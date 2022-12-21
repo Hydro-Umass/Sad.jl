@@ -3,6 +3,10 @@ uuid = "86303e7b-04d2-42a2-bc71-7ba20542e124"
 authors = ["Kostas Andreadis"]
 version = "0.1.0"
 
+[deps]
+DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
+
 [compat]
 julia = "1"
 
