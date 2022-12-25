@@ -17,10 +17,13 @@ Smoothers = "012d725f-b4dd-4916-8440-03955fc52575"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [compat]
+BlackBoxOptim = "0.6"
 DifferentialEquations = "7"
+KernelDensity = "0.6"
 Distributions = "0.25"
 JSON = "0.21"
 NCDatasets = "0.12"
+Smoothers = "0.1"
 julia = "1"
 
 [extras]
