@@ -1,4 +1,4 @@
-# Installation instructions
+# Installation
 
 The latest version of Sad.jl can be installed with Julia's [built-in package manager](https://docs.julialang.org/en/v1/stdlib/Pkg/). You can add the package and then run `instantiate` to install dependencies
 
