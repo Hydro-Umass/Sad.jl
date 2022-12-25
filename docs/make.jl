@@ -1,6 +1,7 @@
 push!(LOAD_PATH, "../src")
 
 import Pkg
+Pkg.add("Documenter")
 Pkg.activate("..")
 
 using Documenter, Sad
