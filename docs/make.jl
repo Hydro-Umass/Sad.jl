@@ -8,5 +8,22 @@ using Documenter, Sad
 makedocs(
     modules = [Sad],
     sitename="Sad.jl",
+    build = "build",
+    clean = true,
+    doctest = true,
+    repo = "https://github.com/Hydro-Umass/Sad.jl",
     checkdocs = :none,
-         format = Documenter.HTML(; prettyurls = get(ENV, "CI", nothing) == "true"))
+    pages = [
+        "Home" => "index.md",
+        "Install" => "installation.md",
+        "Algorithm" => "algorithm.md",
+        "Use cases" => "use_cases.md",
+        "API" => "api.md",
+    ],
+    format = Documenter.HTML(; prettyurls = get(ENV, "CI", nothing) == "true"))
+
+deploydocs(
+    repo = "github.com/Hydro-Umass/Sad.jl",
+    target = "build",
+    push_preview = true,
+)
