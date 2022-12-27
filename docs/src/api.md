@@ -46,4 +46,7 @@
 ```@docs
 	Sad.assimilate
 	Sad.bathymetry!
+	Sad.ahg_constrain!
+	Sad.flow_parameters
+	Sad.estimate
 ```
