@@ -52,12 +52,21 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
         X[2, :] = ne[i]
         XA = h[:, i]
         d = H[:, 1]
-        E = rand(Normal(ϵ₀, ϵ₀/1000), length(d), length(i)) .* rand([-1, 1], length(d), length(i))
+        # adaptive estimation of observation error covariance
+        E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
         A = letkf(X, d, XA, E, diagR=true)
-        Qa[t] = mean(A[1, :])
+        nz = findall(A[1, :] .> 0)
+        # ensure that discharge is positive
+        # FIXME: use a log transform?
+        Aq = A[1, nz]
+        if constrain
+            ahg_constrain!(Aq, H[1, t], hbf, wbf, S0, x, ne[i[nz]], re[i[nz]], ze[:, i[nz]])
+        end
+        Qa[t] = mean(Aq[1, :])
+        Qu[t] = std(Aq[1, :])
         na[t] = mean(A[2, :])
     end
-    Qa, na
+    Qa, Qu, na
 end
 
 """
