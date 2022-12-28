@@ -26,5 +26,4 @@ deploydocs(
     repo = "github.com/Hydro-Umass/Sad.jl",
     target = "build",
     push_preview = true,
-    versions = nothing,
 )
