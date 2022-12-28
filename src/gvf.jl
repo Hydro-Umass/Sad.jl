@@ -61,3 +61,38 @@ function gvf(Q::Float64, ybc::Float64, S0::Vector{Float64}, n::Float64,
             end
     h
 end
+
+"""
+    gvf_ensemble!(H::Vector{Float64}, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
+
+Generate an ensemble of water height profiles from Gradually-Varied-Flow simulations
+and associated profiles of bed elevation.
+
+- `H`: water surface elevation
+- `S`: bed slope
+- `x`: channel chainage
+- `hbf`: bankfull water surface elevation
+- `wbf`: bankfull width
+- `Qe`: ensemble discharge
+- `ne`: ensemble roughness coefficient
+- `re`: ensemble channel shape parameter
+- `ze`: ensemble bed elevation profiles
+
+"""
+function gvf_ensemble!(hbc::Float64, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
+    nens = length(Qe)
+    if ndims(S) > 1
+        Se = S
+    else
+        Se = repeat(S', outer=nens)'
+    end
+    for j in 2:length(x)
+        ze[j, :] = ze[j-1, :] .+ Se[j, :] .* (x[j] - x[j-1]);
+    end
+    ybf = hbf .- ze
+    he = zeros(length(x), nens)
+    for i in 1:nens
+        he[:, i] = gvf(Qe[i], (hbc-ze[1, i])*re[i]/(re[i] + 1), Se[:, i], ne[i], x, wbf, ybf[:, i], [re[i] for _ in 1:length(x)])
+    end
+    he
+end

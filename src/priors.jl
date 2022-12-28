@@ -56,43 +56,7 @@ function prior_ensemble(x::Vector{Float64}, Qp::Distribution, np::Distribution,
 end
 
 """
-    gvf_ensemble!(H::Vector{Float64}, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
-
-Generate an ensemble of water height profiles from Gradually-Varied-Flow simulations
-and associated profiles of bed elevation.
-
-- `H`: water surface elevation
-- `S`: bed slope
-- `x`: channel chainage
-- `hbf`: bankfull water surface elevation
-- `wbf`: bankfull width
-- `Qe`: ensemble discharge
-- `ne`: ensemble roughness coefficient
-- `re`: ensemble channel shape parameter
-- `ze`: ensemble bed elevation profiles
-
-"""
-function gvf_ensemble!(hbc::Float64, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64},
-                       Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
-    nens = length(Qe)
-    if ndims(S) > 1
-        Se = S
-    else
-        Se = repeat(S', outer=nens)'
-    end
-    for j in 2:length(x)
-        ze[j, :] = ze[j-1, :] .+ Se[j, :] .* (x[j] - x[j-1]);
-    end
-    ybf = hbf .- ze
-    he = zeros(length(x), nens)
-    for i in 1:nens
-        he[:, i] = gvf(Qe[i], (hbc-ze[1, i])*re[i]/(re[i] + 1), Se[:, i], ne[i], x, wbf, ybf[:, i], [re[i] for _ in 1:length(x)])
-    end
-    he
-end
-
-"""
-    rejection_sampling(Qp, np, rp, zp, x, H, S0, hbc, wbf, hbf, nens)
+    rejection_sampling(Qp, np, rp, zp, x, H, S0, hbc, wbf, hbf, nens, nsamples)
 
 Use rejection sampling to select a subset of the prior ensemble.
 
@@ -108,13 +72,12 @@ Use rejection sampling to select a subset of the prior ensemble.
 - `wbf`: bankfull width
 - `hbf`: bankfull water surface elevation
 - `nens`: ensemble size
+- `nsamples`: number of samples
 
 """
-function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution,
-                            x::Vector{Float64}, H::Matrix{Float64}, S0::Vector{Float64}, hbc::Float64,
-                             wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int)
-    Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
-    he = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qe, ne, re, ze)
+function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{Float64}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int)
+    Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nsamples)
+    he = gvf_ensemble!(mean(H[1, :]), S0, x, hbf, wbf, Qe, ne, re, ze)
     h = ze .+ he .* ((re .+ 1) ./ re)'
     i = findall(he[1, :] .> 0)
     obs = mean(H, dims=1)[1, :]
@@ -123,10 +86,25 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     Fmod = kde(mod)
     L = 1.0
     accepted = [rand(Uniform(0, L)) * pdf(Fmod, s) <= pdf(Fobs, s) for s in mod]
-    Qpₘ = LogNormal(log(mean(Qe[i[accepted]])) - (std(Qe[i[accepted]]) / mean(Qe[i[accepted]]))^2/2,
-                    std(Qe[i[accepted]]) / mean(Qe[i[accepted]]))
-    rpₘ = Truncated(Normal(mean(re[i[accepted]]), std(re[i[accepted]])), 0.5, 20.0)
+    Qm = mean(Qe[i[accepted]])
+    Qcv = std(Qe[i[accepted]]) / mean(Qe[i[accepted]])
+    Qpₘ = Truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), 0.1*Qm, 10*Qm)
     zpₘ = Truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(H[1, :]))
+    re = lhs_ensemble(nens, rp)[1]
+    Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
+    hm = zeros(nens)
+    for e=1:nens
+        he = zeros(length(x), size(H, 2))
+        for t=1:size(H, 2)
+            he[:, t] = gvf_ensemble!(H[1, t], S0, x, hbf, wbf, [Qe[t]], [ne[t]], [re[e]], ze)
+            h = ze .+ he .* ((re[e] .+ 1) ./ re[e])'
+            i = findall(he[1, :] .> 0)
+            hm[e] = mean(h[:, i])
+        end
+    end
+    reₘ = re[argmin(abs.(mean(H) .- hm))]
+    # assume a CV of 0.1 for the channel shape parameter
+    rpₘ = Truncated(Normal(reₘ, 0.1*reₘ), 0.5, 20.0)
     Qpₘ, np, rpₘ, zpₘ
 end
 
