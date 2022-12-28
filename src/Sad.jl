@@ -35,7 +35,7 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
     Qu = zeros(1, nt)
     na = zeros(1, nt)
     S = diff(H, dims=1) ./ diff(x)
-    S = [S[1, :]; S]
+    S = [S[1, :]'; S]
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     for t in 1:nt
         he = gvf_ensemble!(H[1, t], S0, x, hbf, wbf, Qe, ne, re, ze)
@@ -55,15 +55,19 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
         # adaptive estimation of observation error covariance
         E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
         A = letkf(X, d, XA, E, diagR=true)
-        nz = findall(A[1, :] .> 0)
-        # ensure that discharge is positive
-        # FIXME: use a log transform?
-        Aq = A[1, nz]
-        if constrain
-            ahg_constrain!(Aq, H[1, t], hbf, wbf, S0, x, ne[i[nz]], re[i[nz]], ze[:, i[nz]])
+        # if estimated discharge is negative, use a log transform in the assimilation
+        qm = mean(A[1, :])
+        if qm < 0
+            X[1, :] = log.(Qe[i])
+            A = letkf(X, d, XA, E, diagR=true)
+            A[1, :] .= exp.(A[1, :])
         end
-        Qa[t] = mean(Aq[1, :])
-        Qu[t] = std(Aq[1, :])
+        Aq = A[1, :]
+        if constrain
+            ahg_constrain!(Aq, H[1, t], hbf, wbf, S0, x, ne[i], re[i], ze[:, i])
+        end
+        Qa[t] = mean(Aq)
+        Qu[t] = std(Aq)
         na[t] = mean(A[2, :])
     end
     Qa, Qu, na
@@ -125,28 +129,32 @@ Constrain assimilated discharge with At-a-Station hydraulic geometry (AHG) relat
 
 """
 function ahg_constrain!(Qa::Vector{Float64}, hbc::Float64, hbf::Vector{Float64}, wbf::Vector{Float64}, S0::Vector{Float64}, x::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze::Matrix{Float64}, tol::Float64=1e-3)
-    ha = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qa, ne, re, ze)
+    j = findall(Qa .> 0)
+    ha = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qa[j], ne[j], re[j], ze[:, j])
     i = findall(ha[1, :] .> 0)
+    ij = j[i] # index that combines positive discharge and flow depth 
     w = zeros(length(x), length(i))
     for e=1:length(i)
-        w[:, e] = [width(Dingman(wbf[k], hbf[k], ha[k, e]*(re[i[k]]+1)/re[i[k]], re[i[k]], S0[k], ne[i[k]])) for k=1:length(x)]
+        for k=1:length(x)
+            w[k, e] = width(Dingman(wbf[k], hbf[k], ha[k, i[e]]*(re[ij[e]]+1)/re[ij[e]], re[ij[e]], S0[k], ne[ij[e]]))
+        end
     end
-    qₗ = log.(Qa[i])
+    qₗ = log.(Qa[ij])
     wₗ = log.(w[1, :])
-    yₗ = log.(ha[1, i] .* (re[i] .+ 1) ./ re[i])
+    yₗ = log.(ha[1, i] .* (re[ij] .+ 1) ./ re[ij])
     bw = (sum(qₗ .* wₗ) .- (1/length(qₗ)) .* sum(qₗ) .* sum(wₗ)) / (sum(qₗ.^2) .- (1/length(qₗ)) * sum(qₗ)^2)
     aw = mean(wₗ) - bw * mean(qₗ)
     by = (sum(qₗ .* yₗ) .- (1/length(qₗ)) .* sum(qₗ) .* sum(yₗ)) / (sum(qₗ.^2) .- (1/length(qₗ)) * sum(qₗ)^2)
     ay = mean(yₗ) - by * mean(qₗ)
-    X = zeros(1, length(i))
+    X = zeros(1, length(ij))
     X[1, :] = qₗ
-    XA = zeros(2, length(i))
+    XA = zeros(2, length(ij))
     XA[1, :] = sqrt.((wₗ .- (aw .+ bw .* qₗ)).^2)
     XA[2, :] = sqrt.((yₗ .- (ay .+ by .* qₗ)).^2)
     d = [0.0; 0.0]
     E = diagm([tol, tol])
     A = letkf(X, d, XA, E, diagR=true)
-    Qa[i] = A
+    Qa .= ((Qa .- mean(Qa[j])) ./ std(Qa)) .* std(exp.(A)) .+ mean(exp.(A))
 end
 
 """
