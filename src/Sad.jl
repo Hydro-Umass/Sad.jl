@@ -131,7 +131,7 @@ function ahg_constrain!(Qa::Vector{Float64}, hbc::Float64, hbf::Vector{Float64},
     j = findall(Qa .> 0)
     ha = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qa[j], ne[j], re[j], ze[:, j])
     i = findall(ha[1, :] .> 0)
-    ij = j[i] # index that combines positive discharge and flow depth 
+    ij = j[i] # index that combines positive discharge and flow depth
     w = zeros(length(x), length(i))
     for e=1:length(i)
         for k=1:length(x)
@@ -188,11 +188,11 @@ Estimate discharge and flow parameters from SWOT observations.
 function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
     wbf = maximum(W, dims=2)[:, 1]
     hbf = maximum(H, dims=2)[:, 1]
-    S0 = mean(diff(H, dims=1) ./ diff(x), dims=2)[:, 1]
+    S = diff(H, dims=1) ./ diff(x)
+    S0 = mean(S, dims=2)[:, 1]
     S0 = [S0[1]; S0]
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
-    S = diff(H, dims=1) ./ diff(x)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
     Se = [Se[1, :]'; Se]
     bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
@@ -205,6 +205,8 @@ export
     width,
     depth,
     gvf,
+    rejection_sampling,
+    prior_ensemble,
     assimilate
 
 
