@@ -31,9 +31,9 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
     seed!(1)
     min_ensemble_size = 5
     nt = size(H, 2)
-    Qa = zeros(1, nt)
-    Qu = zeros(1, nt)
-    na = zeros(1, nt)
+    Qa = zeros(nt)
+    Qu = zeros(nt)
+    na = zeros(nt)
     S = diff(H, dims=1) ./ diff(x)
     S = [S[1, :]'; S]
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
@@ -51,7 +51,7 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
         X[1, :] = Qe[i]
         X[2, :] = ne[i]
         XA = h[:, i]
-        d = H[:, 1]
+        d = H[:, t]
         # adaptive estimation of observation error covariance
         E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
         A = letkf(X, d, XA, E, diagR=true)
@@ -189,15 +189,16 @@ function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp
     wbf = maximum(W, dims=2)[:, 1]
     hbf = maximum(H, dims=2)[:, 1]
     S = diff(H, dims=1) ./ diff(x)
+    S = [S[1, :]'; S]
     S0 = mean(S, dims=2)[:, 1]
-    S0 = [S0[1]; S0]
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
     Se = [Se[1, :]'; Se]
     bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
-    zp = Truncated(Normal(mean(ze[1, :]), std(ze[1, :])), -Inf, minimum(H[1, :]))
-    Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Se, Qp, np, rp, zp, nens)
+    zp = Truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
+    Sa = mean(Se, dims=2)[:, 1]
+    Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
     Qa, Qu, na
 end
 
