@@ -25,5 +25,6 @@ makedocs(
 deploydocs(
     repo = "github.com/Hydro-Umass/Sad.jl",
     target = "build",
+    versions = nothing,
     push_preview = true,
 )

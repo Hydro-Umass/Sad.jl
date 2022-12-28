@@ -8,7 +8,7 @@ include("priors.jl")
 include("kalman.jl")
 
 """
-    assimilate(H::Vector{Float64})
+    assimilate(H, W, x, wbf, hbf, S0, Qp, np, rp, zp, nens, constrain)
 
 Assimilate SWOT observations for river reach.
 
@@ -24,7 +24,7 @@ Assimilate SWOT observations for river reach.
 - `rₚ`: prior probability distribution for channel shape parameter
 - `zₚ`: prior distribution for downstream bed elevation
 - `nens`: ensemble size
-- `ϵₒ`: observation error standard deviation
+- `constrain`: switch for applying AHG constraint
 
 """
 function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, constrain::Bool=true)
@@ -74,7 +74,7 @@ function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np
 end
 
 """
-    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, H, ϵ₀::Float64=0.01)
+    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, H)
 
 Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water surface elevation observations.
 
@@ -88,10 +88,9 @@ Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water su
 - `hbf`: bankfull water surface elevation
 - `wbf`: bankfull width
 - `H`: time-averaged water surface elevation observed
-- `ϵ₀`: observation error standard deviation
 
 """
-function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, ϵ₀::Float64=0.01)
+function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64})
     seed!(1)
     min_ensemble_size = 5
     he = gvf_ensemble!(H[1], Se, x, hbf, wbf, Qe, ne, re, ze)
@@ -101,7 +100,7 @@ function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float6
         X = ze[:, i]
         XA = h[:, i]
         d = H
-        E = rand(Normal(ϵ₀, ϵ₀/1000), length(d), length(i)) .* rand([-1, 1], length(d), length(i))
+        E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
         A = letkf(X, d, XA, E, diagR=true)
         # FIXME ensure that estimated bathymetry is plausible
         ze = A

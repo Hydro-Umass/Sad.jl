@@ -2,7 +2,7 @@ using LinearAlgebra
 using Statistics
 
 """
-    letkf(A::Matrix{Float64}, d::Vector{Float64}, HA::Matrix{Float64}, E::Matrix{Float64}, ρ::Float64, diagR::Bool)
+    letkf(A, d, HA, E, ρ, diagR)
 
 Apply the Local Ensemble Transform Kalman Filter algorithm.
 
