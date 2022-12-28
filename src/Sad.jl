@@ -27,14 +27,15 @@ Assimilate SWOT observations for river reach.
 - `ϵₒ`: observation error standard deviation
 
 """
-function assimilate(H, W, x, wbf, hbf, S, Qp, np, rp, zp, nens, ϵ₀::Float64=0.01)
+function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, constrain::Bool=true)
     seed!(1)
     min_ensemble_size = 5
     nt = size(H, 2)
     Qa = zeros(1, nt)
+    Qu = zeros(1, nt)
     na = zeros(1, nt)
-    # FIXME: estimate bed slope
-    S0 = S
+    S = diff(H, dims=1) ./ diff(x)
+    S = [S[1, :]; S]
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     for t in 1:nt
         he = gvf_ensemble!(H[1, t], S0, x, hbf, wbf, Qe, ne, re, ze)
@@ -97,6 +98,61 @@ function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float6
 end
 
 """
+    ahg_constrain!(Qa, hbc, hbf, wbf, S0, x, ne, re, ze, tol=1e-3)
+
+Constrain assimilated discharge with At-a-Station hydraulic geometry (AHG) relationships.
+
+# Arguments
+- `Qa`: assimilated ensemble discharge
+- `hbc`: downstream boundary water surface elevation
+- `hbf`: bankfull water surface elevation
+- `wbf`: bankfull width
+- `S0`: bed slope
+- `x`: channel chainage
+- `ne`: ensemble roughness coefficient
+- `re`: ensemble channel shape parameter
+- `ze`: ensemble bed elevation
+- `tol`: numeric tolerance for closing the AHG relationships
+
+"""
+function ahg_constrain!(Qa::Vector{Float64}, hbc::Float64, hbf::Vector{Float64}, wbf::Vector{Float64}, S0::Vector{Float64}, x::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze::Matrix{Float64}, tol::Float64=1e-3)
+    ha = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qa, ne, re, ze)
+    i = findall(ha[1, :] .> 0)
+    w = zeros(length(x), length(i))
+    for e=1:length(i)
+        w[:, e] = [width(Dingman(wbf[k], hbf[k], ha[k, e]*(re[i[k]]+1)/re[i[k]], re[i[k]], S0[k], ne[i[k]])) for k=1:length(x)]
+    end
+    qₗ = log.(Qa[i])
+    wₗ = log.(w[1, :])
+    yₗ = log.(ha[1, i] .* (re[i] .+ 1) ./ re[i])
+    bw = (sum(qₗ .* wₗ) .- (1/length(qₗ)) .* sum(qₗ) .* sum(wₗ)) / (sum(qₗ.^2) .- (1/length(qₗ)) * sum(qₗ)^2)
+    aw = mean(wₗ) - bw * mean(qₗ)
+    by = (sum(qₗ .* yₗ) .- (1/length(qₗ)) .* sum(qₗ) .* sum(yₗ)) / (sum(qₗ.^2) .- (1/length(qₗ)) * sum(qₗ)^2)
+    ay = mean(yₗ) - by * mean(qₗ)
+    X = zeros(1, length(i))
+    X[1, :] = qₗ
+    XA = zeros(2, length(i))
+    XA[1, :] = sqrt.((wₗ .- (aw .+ bw .* qₗ)).^2)
+    XA[2, :] = sqrt.((yₗ .- (ay .+ by .* qₗ)).^2)
+    d = [0.0; 0.0]
+    E = diagm([tol, tol])
+    A = letkf(X, d, XA, E, diagR=true)
+    Qa[i] = A
+end
+
+"""
+    flow_parameters()
+
+Estimate flow parameters (roughness coefficient and baseflow cross-sectional area) from assimilated discharge.
+
+# Arguments
+
+"""
+function flow_parameters()
+    nothing
+end
+
+"""
     estimate(x, H, W, Qp, np, rp, zp, nens)
 
 Estimate discharge and flow parameters from SWOT observations.
@@ -110,22 +166,23 @@ Estimate discharge and flow parameters from SWOT observations.
 - `rp`: channel shape parameter prior distribution
 - `zp`: downstream bed elevation prior distribution
 - `nens`: ensemble size
+- `nsamples`: sample size for rejection sampling
 
 """
-function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int)
+function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
     wbf = maximum(W, dims=2)[:, 1]
     hbf = maximum(H, dims=2)[:, 1]
     S0 = mean(diff(H, dims=1) ./ diff(x), dims=2)[:, 1]
     S0 = [S0[1]; S0]
-    Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, mean(H[1, :]), wbf, hbf, nens);
-    Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens);
-    S = diff(H, dims=1) ./ diff(x);
-    Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens];
+    Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
+    Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
+    S = diff(H, dims=1) ./ diff(x)
+    Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
     Se = [Se[1, :]'; Se]
     bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
     zp = Truncated(Normal(mean(ze[1, :]), std(ze[1, :])), -Inf, minimum(H[1, :]))
-    Qa, na = assimilate(H, W, x, wbf, hbf, Se, Qp, np, rp, zp, nens)
-    Qa, na
+    Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Se, Qp, np, rp, zp, nens)
+    Qa, Qu, na
 end
 
 export
