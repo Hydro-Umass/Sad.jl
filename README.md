@@ -1,6 +1,6 @@
 # SWOT Assimilated Discharge (SAD)
 
-**Documentation** [![](https://img.shields.io/badge/docs-online-blue.svg)](https://hydro-umass.github.io/Sad.jl/)
+**Documentation** [![](https://img.shields.io/badge/docs-online-blue.svg)](https://hydro-umass.github.io/Sad.jl/stable)
 
 **Build/Tests** [![CI](https://github.com/Hydro-Umass/Sad.jl/workflows/CI/badge.svg)](https://github.com/Hydro-Umass/Sad.jl/actions?query=workflow:CI)
 
