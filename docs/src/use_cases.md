@@ -44,7 +44,7 @@ S = diff(H, dims=1) ./ diff(x);
 Se = repeat(S', outer=3)'[:, 1:1000];
 Se = [Se[1, :]'; Se]
 Sad.bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
-zp = Truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
+zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
 Sa = mean(Se, dims=2)[:, 1]
 ```
 

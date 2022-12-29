@@ -2,12 +2,11 @@ module Sad
 
 abstract type CrossSection end
 
-@enum River begin
-    braided=1
-    sinuous=2
-    more_sinuous=3
-    straight=4
-end
+# river classification
+@enum River braided=1 sinuous=2 more_sinuous=3 straight=4
+
+# type for handling missing data
+const FloatM = Union{Missing, Float64}
 
 include("crosssections.jl")
 include("gvf.jl")
@@ -225,7 +224,7 @@ function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp
     Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
     za = zeros(length(x))
     za[1] = mean(zp)
-    for i=2:length(x) za[i] = za[i+1] + Sa[i] * (x[i] - x[i-1]) end
+    for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
     A0, n = flow_parameters(Qa, na, x, H[1, :], W[1, :], S[1, :], Sa, hbf, wbf, mean(re), za)
     Qa, Qu, A0, n
 end
