@@ -27,7 +27,7 @@ S0 = [S0[1]; S0]
 Then we can derive the prior distributions using rejection sampling from uninformative priors
 
 ```julia
-Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(H[1, :]))
+Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(H[1, :]), Sad.sinuous)
 Qp, np, rp, zp = Sad.rejection_sampling(Qp0, np0, rp0, zp0, x, H, S0, mean(H[1, :]), wbf, hbf, 1000);
 ```
 
@@ -44,13 +44,16 @@ S = diff(H, dims=1) ./ diff(x);
 Se = repeat(S', outer=3)'[:, 1:1000];
 Se = [Se[1, :]'; Se]
 Sad.bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
-zp = Truncated(Normal(mean(ze[1, :]), std(ze[1, :])), -Inf, minimum(H[1, :]))
+zp = Truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
+Sa = mean(Se, dims=2)[:, 1]
 ```
 
 and finally we assimilate the observed water surface elevation to estimate discharge and flow parameters, which include roughness coefficient and minimum cross-sectional area
 
 ```julia
-Qa, na = assimilate(H, W, x, wbf, hbf, Se, Qp, np, rp, zp, nens)
+Qa, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
 ```
+
+![po](./assets/po.png)
 
 ## Confluence
