@@ -88,8 +88,8 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     accepted = [rand(Uniform(0, L)) * pdf(Fmod, s) <= pdf(Fobs, s) for s in mod]
     Qm = mean(Qe[i[accepted]])
     Qcv = std(Qe[i[accepted]]) / mean(Qe[i[accepted]])
-    Qpₘ = Truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
-    zpₘ = Truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(H[1, :]))
+    Qpₘ = truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
+    zpₘ = truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(H[1, :]))
     re = lhs_ensemble(nens, rp)[1]
     Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
     hm = zeros(nens)
@@ -104,7 +104,7 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     end
     reₘ = re[argmin(abs.(mean(H) .- hm))]
     # assume a CV of 0.1 for the channel shape parameter
-    rpₘ = Truncated(Normal(reₘ, 0.1*reₘ), 0.5, 20.0)
+    rpₘ = truncated(Normal(reₘ, 0.1*reₘ), 0.5, 20.0)
     Qpₘ, np, rpₘ, zpₘ
 end
 
@@ -133,9 +133,9 @@ Derive distributions for discharge, roughness coefficient, channel shape paramet
 """
 function priors(qwbm::Float64, hmin::Float64, class::River)
     rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
-    Qp = Truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
+    Qp = truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
     np = Uniform(0.01, 0.07)
-    # rp = Truncated(Normal(2.5, 0.5), 0.5, 20.0)
+    # rp = truncated(Normal(2.5, 0.5), 0.5, 20.0)
     rp = Uniform(rbnds[Int(class)]...)
     zp = Uniform(hmin-20, hmin)
     Qp, np, rp, zp
