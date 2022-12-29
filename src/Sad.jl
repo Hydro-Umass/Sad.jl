@@ -2,6 +2,13 @@ module Sad
 
 abstract type CrossSection end
 
+@enum River begin
+    braided=1
+    sinuous=2
+    more_sinuous=3
+    straight=4
+end
+
 include("crosssections.jl")
 include("gvf.jl")
 include("priors.jl")
@@ -157,15 +164,33 @@ function ahg_constrain!(Qa::Vector{Float64}, hbc::Float64, hbf::Vector{Float64},
 end
 
 """
-    flow_parameters()
+    flow_parameters(Qa, na, x, H, W, S, S0, hbf, wbf, r, z)
 
 Estimate flow parameters (roughness coefficient and baseflow cross-sectional area) from assimilated discharge.
 
 # Arguments
+- `Qa`: time series of estimated discharge
+- `na`: time series of estimate roughness coefficient
+- `x`: channel chainage
+- `H`: time series of observed water surface elevation (reach)
+- `W`: time series of observed width (reach)
+- `S`: time series of observed slope (reach)
+- `S0`: bed slope
+- `hbf`: bankfull water surface elevation
+- `wbf`: bankfull width
+- `r`: channel shape parameter
+- `z`: bed elevation
 
 """
-function flow_parameters()
-    nothing
+function flow_parameters(Qa::Vector{Float64}, na::Vector{Float64}, x::Vector{Float64}, H::Vector{Float64}, W::Vector{Float64}, S::Vector{Float64}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
+    ybf = hbf .- z
+    ha = zeros(length(Qa))
+    for t=1:length(Qa)
+        h = gvf(Qa[t], (H[t]-z[1])*r/(r+1), S0, na[t], x, wbf, ybf, [r for _ in 1:length(x)])
+        ha[t] = h[1]
+    end
+    A0 = (na .* Qa .* W.^(2/3) .* S.^(-1/2)).^(3/5) .- W .* ha
+    mean(A0), mean(na)
 end
 
 """
@@ -198,14 +223,14 @@ function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp
     zp = Truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
     Sa = mean(Se, dims=2)[:, 1]
     Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
-    Qa, Qu, na
+    za = zeros(length(x))
+    za[1] = mean(zp)
+    for i=2:length(x) za[i] = za[i+1] + Sa[i] * (x[i] - x[i-1]) end
+    A0, n = flow_parameters(Qa, na, x, H[1, :], W[1, :], S[1, :], Sa, hbf, wbf, mean(re), za)
+    Qa, Qu, A0, n
 end
 
 export
-    braided,
-    sinuous,
-    more_sinuous,
-    straight,
     Rectangular,
     Dingman,
     width,
