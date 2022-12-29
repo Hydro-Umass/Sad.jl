@@ -88,7 +88,7 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     accepted = [rand(Uniform(0, L)) * pdf(Fmod, s) <= pdf(Fobs, s) for s in mod]
     Qm = mean(Qe[i[accepted]])
     Qcv = std(Qe[i[accepted]]) / mean(Qe[i[accepted]])
-    Qpₘ = Truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), 0.1*Qm, 10*Qm)
+    Qpₘ = Truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
     zpₘ = Truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(H[1, :]))
     re = lhs_ensemble(nens, rp)[1]
     Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
@@ -131,10 +131,12 @@ Derive distributions for discharge, roughness coefficient, channel shape paramet
 - `hmin`: minimum downstream water surface elevation
 
 """
-function priors(qwbm::Float64, hmin::Float64)
+function priors(qwbm::Float64, hmin::Float64, class::River)
+    rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
     Qp = Truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
     np = Uniform(0.01, 0.07)
-    rp = Truncated(Normal(2.5, 0.5), 0.5, 20.0)
+    # rp = Truncated(Normal(2.5, 0.5), 0.5, 20.0)
+    rp = Uniform(rbnds[Int(class)]...)
     zp = Uniform(hmin-20, hmin)
     Qp, np, rp, zp
 end

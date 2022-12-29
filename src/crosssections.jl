@@ -1,5 +1,7 @@
 using Sad: CrossSection
 
+@enum River braided=1 sinuous=2 more_sinuous=3 straight=4
+
 """
 Rectangular river channel cross section.
 
