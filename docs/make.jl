@@ -15,7 +15,7 @@ makedocs(
     checkdocs = :none,
     pages = [
         "Home" => "index.md",
-        "Install" => "installation.md",
+        "Installation" => "installation.md",
         "Algorithm" => "algorithm.md",
         "Use cases" => "use_cases.md",
         "API" => "api.md",
