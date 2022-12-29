@@ -194,7 +194,6 @@ function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
-    Se = [Se[1, :]'; Se]
     bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
     zp = Truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
     Sa = mean(Se, dims=2)[:, 1]
@@ -203,6 +202,12 @@ function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp
 end
 
 export
+    braided,
+    sinuous,
+    more_sinuous,
+    straight,
+    Rectangular,
+    Dingman,
     width,
     depth,
     gvf,
