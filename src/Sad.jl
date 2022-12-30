@@ -193,6 +193,22 @@ function flow_parameters(Qa::Vector{Float64}, na::Vector{Float64}, x::Vector{Flo
 end
 
 """
+    drop_unobserved(x, H, W)
+
+Remove cross sections with no valid observations.
+
+# Arguments
+- `x`: channel chainage
+- `H`: time series of water surface elevation profiles
+- `W`: time series of width profiles
+
+"""
+function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM})
+    i = [j for j=1:size(H, 1) if !all(ismissing.(H[j, :]))]
+    x[i], H[i, :], W[i, :]
+end
+
+"""
     estimate(x, H, W, Qp, np, rp, zp, nens)
 
 Estimate discharge and flow parameters from SWOT observations.
@@ -209,12 +225,17 @@ Estimate discharge and flow parameters from SWOT observations.
 - `nsamples`: sample size for rejection sampling
 
 """
-function estimate(x::Vector{Float64}, H::Matrix{Float64}, W::Matrix{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
-    wbf = maximum(W, dims=2)[:, 1]
-    hbf = maximum(H, dims=2)[:, 1]
+function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
+    x, H, W = drop_unobserved(x, H, W)
+    wbf = maximum.(skipmissing.(eachrow(W)))
+    hbf = maximum.(skipmissing.(eachrow(H)))
     S = diff(H, dims=1) ./ diff(x)
     S = [S[1, :]'; S]
-    S0 = mean(S, dims=2)[:, 1]
+    S0 = mean.(skipmissing.(eachrow(S)))
+    # calculate slope based on mean WSE if adjacent cross sections did not have
+    # coincident valid observations
+    i = findall(isnan.(S0))
+    S0[i] = (diff(mean.(skipmissing.(eachrow(H)))) ./ diff(x))[i]
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]

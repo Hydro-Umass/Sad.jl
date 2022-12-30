@@ -75,13 +75,14 @@ Use rejection sampling to select a subset of the prior ensemble.
 - `nsamples`: number of samples
 
 """
-function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{Float64}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int)
+function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{FloatM}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nsamples)
-    he = gvf_ensemble!(mean(H[1, :]), S0, x, hbf, wbf, Qe, ne, re, ze)
+    he = gvf_ensemble!(mean(skipmissing(H[1, :])), S0, x, hbf, wbf, Qe, ne, re, ze)
     h = ze .+ he .* ((re .+ 1) ./ re)'
     i = findall(he[1, :] .> 0)
-    obs = mean(H, dims=1)[1, :]
-    Fobs = kde(obs)
+    # obs = mean(H, dims=1)[1, :]
+    obs = mean.(skipmissing.(eachcol(H)))
+    Fobs = kde(obs[.!isnan.(obs)])
     mod = mean(h[:, i], dims=1)[1, :]
     Fmod = kde(mod)
     L = 1.0
@@ -89,20 +90,21 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     Qm = mean(Qe[i[accepted]])
     Qcv = std(Qe[i[accepted]]) / mean(Qe[i[accepted]])
     Qpₘ = truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
-    zpₘ = truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(H[1, :]))
+    zpₘ = truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(skipmissing(H[1, :])))
     re = lhs_ensemble(nens, rp)[1]
     Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
     hm = zeros(nens)
     for e=1:nens
         he = zeros(length(x), size(H, 2))
         for t=1:size(H, 2)
-            he[:, t] = gvf_ensemble!(H[1, t], S0, x, hbf, wbf, [Qe[t]], [ne[t]], [re[e]], ze)
+            hbc = ismissing(H[1, t]) ? mean(skipmissing(H[1, :])) : H[1, t]
+            he[:, t] = gvf_ensemble!(hbc, S0, x, hbf, wbf, [Qe[t]], [ne[t]], [re[e]], ze)
             h = ze .+ he .* ((re[e] .+ 1) ./ re[e])'
             i = findall(he[1, :] .> 0)
             hm[e] = mean(h[:, i])
         end
     end
-    reₘ = re[argmin(abs.(mean(H) .- hm))]
+    reₘ = re[argmin(abs.(mean(mean.(skipmissing.(eachrow(H)))) .- hm))]
     # assume a CV of 0.1 for the channel shape parameter
     rpₘ = truncated(Normal(reₘ, 0.1*reₘ), 0.5, 20.0)
     Qpₘ, np, rpₘ, zpₘ
