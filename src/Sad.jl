@@ -94,9 +94,10 @@ Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water su
 - `hbf`: bankfull water surface elevation
 - `wbf`: bankfull width
 - `H`: time-averaged water surface elevation observed
+- `ϵₒ`: observation error (default value of 10 cm)
 
 """
-function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64})
+function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, ϵₒ::Float64=0.1)
     seed!(1)
     min_ensemble_size = 5
     he = gvf_ensemble!(H[1], Se, x, hbf, wbf, Qe, ne, re, ze)
@@ -107,10 +108,14 @@ function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float6
         XA = h[:, i]
         d = H
         E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
+        E[E .< ϵₒ] .= ϵₒ
         A = letkf(X, d, XA, E, diagR=true)
         # FIXME ensure that estimated bathymetry is plausible
-        ze = A
-        Se = diff(ze, dims=1) ./ diff(x)
+        ze[:, i] .= A
+        S = diff(ze, dims=1) ./ diff(x)
+        S = [S[1, :]'; S]
+        for k=1:length(x) S[k, S[k, :] .< 0] .= minimum(Se[k, :]) end
+        Se .= S
     end
     nothing
 end
@@ -231,18 +236,33 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, Qp::
     hbf = maximum.(skipmissing.(eachrow(H)))
     S = diff(H, dims=1) ./ diff(x)
     S = [S[1, :]'; S]
-    S0 = mean.(skipmissing.(eachrow(S)))
-    # calculate slope based on mean WSE if adjacent cross sections did not have
-    # coincident valid observations
-    i = findall(isnan.(S0))
-    S0[i] = (diff(mean.(skipmissing.(eachrow(H)))) ./ diff(x))[i]
+    # calculate initial bed slope as the mean water surface slope
+    # when data are missing, we may end up with negative slopes which
+    # can cause numerical instabilities in the GVF model so we use either
+    # the minimum positive slope or the entire reach time-averaged slope
+    S0 = zeros(length(x))
+    Sm = mean.(skipmissing.(eachrow(S)))
+    for k=1:length(x)
+        s = S[k, :]
+        s = s[.!ismissing.(s)]
+        if length(s) < 1 || maximum(s) < 0
+            S0[k] = mean(Sm[.!isnan.(Sm)])
+        else
+            S0[k] = mean(s[s .> 0])
+        end
+    end
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
-    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
-    zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
+    for k=1:length(x)
+        Se[k, ismissing.(Se[k, :])] .= S0[k]
+        Se[k, Se[k, :] .< 0] .= S0[k]
+    end
+    Se = convert(Matrix{Float64}, Se)
+    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
+    zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(skipmissing(H[1, :])))
     Sa = mean(Se, dims=2)[:, 1]
-    Qa, Qu, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
+    Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
