@@ -24,6 +24,7 @@ wbf = maximum(W, dims=2)[:, 1]
 S = diff(H, dims=1) ./ diff(x)
 S = [S[1, :]'; S]
 S0 = mean(S, dims=2)[:, 1]
+S = convert(Matrix{Sad.FloatM}, S)
 
 # perform estimation
 nens = 20
@@ -48,11 +49,11 @@ Sa = mean(Se, dims=2)[:, 1]
     @test mean(Sa) isa Real
 end
 
-Qa, Qu, na = Sad.assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
+Qa, Qu, na = Sad.assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
 za = zeros(length(x))
 za[1] = mean(zp)
 for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
-A0, n = Sad.flow_parameters(Qa, na, x, H[1, :], W[1, :], S[1, :], Sa, hbf, wbf, mean(re), za)
+A0, n = Sad.flow_parameters(Qa, na, x, H, W, S, Sa, hbf, wbf, mean(re), za)
 
 @testset "estimation" begin
     @test mean(Qa) > 0
