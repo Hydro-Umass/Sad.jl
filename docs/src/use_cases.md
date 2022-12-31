@@ -56,4 +56,43 @@ Qa, na = assimilate(H, W, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
 
 ![po](./assets/po.png)
 
+## Pepsi-2 experiment
+
+The Pepsi-2 experiment added more river case studies as well as more realistic synthetic SWOT observations with partial reach coverage and observation errors. Most of the code described above for the [Pepsi-1 experiment](@ref) is contained within the `Sad.estimate` function. We start by loading the data
+
+```julia
+using NCDatasets, Statistics, Distributions, Sad
+f = Dataset("../../data/pepsi2/phase3/ArialKhan.nc")
+g = NCDatasets.group(f, "XS_Timeseries")
+qwbm = NCDatasets.group(f, "River_Info")["QWBM"][1]
+x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
+Q = g["Q"][:][end:-1:1, :]
+H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
+W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
+```
+
+The `Sad.FloatM` is an alias to `Union(Missing, Float64)` type to be able to handle missing data.
+
+```julia
+H[H .== -9999.0] .= missing
+W[W .== -9999.0] .= missing
+```
+
+The water surface elevations for a SWOT satellite overpass are shown in the figure below
+![overpass](./assets/arial_h.png)
+
+We will get the prior distributions
+
+```julia
+Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(skipmissing(H[1, :])), Sad.braided)
+```
+
+and then estimate discharge and flow parameters
+
+```julia
+Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp0, np0, rp0, zp0, 100, 1000)
+```
+
+![arial](./assets/arial_q.png)
+
 ## Confluence
