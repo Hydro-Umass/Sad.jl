@@ -19,8 +19,8 @@ x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
 Q = g["Q"][:][end:-1:1, :]
 H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
 W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
-hbf = maximum(H, dims=2)[:, 1]
-wbf = maximum(W, dims=2)[:, 1]
+wbf = maximum.(skipmissing.(eachrow(W)))
+hbf = maximum.(skipmissing.(eachrow(H)))
 S = diff(H, dims=1) ./ diff(x)
 S = [S[1, :]'; S]
 S0 = mean(S, dims=2)[:, 1]
@@ -40,7 +40,8 @@ Qe, ne, re, ze = Sad.prior_ensemble(x, Qp, np, rp, zp, nens)
 end
 
 Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
-Sad.bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean(H, dims=2)[:, 1])
+Se = convert(Matrix{Float64}, Se)
+Sad.bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
 zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
 Sa = mean(Se, dims=2)[:, 1]
 
