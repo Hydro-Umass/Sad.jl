@@ -17,8 +17,8 @@ g = NCDatasets.group(f, "XS_Timeseries");
 qwbm = NCDatasets.group(f, "River_Info")["QWBM"][1]
 x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
 Q = g["Q"][:][end:-1:1, :]
-H = g["H"][:][end:-1:1, :]
-W = g["W"][:][end:-1:1, :]
+H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
+W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
 hbf = maximum(H, dims=2)[:, 1]
 wbf = maximum(W, dims=2)[:, 1]
 S = diff(H, dims=1) ./ diff(x)
