@@ -100,7 +100,7 @@ function gvf_ensemble!(hbc::Float64, S, x::Vector{Float64}, hbf::Vector{Float64}
 end
 
 """
-    interpolate_h(x, H, S)
+    interpolate_hbc(x, H, S)
 
 Interpolate water surface elevation boundary condition by assuming uniform flow, i.e., energy slope is equal to bed slope.
 
