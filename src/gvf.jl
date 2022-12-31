@@ -63,7 +63,7 @@ function gvf(Q::Float64, ybc::Float64, S0::Vector{Float64}, n::Float64,
 end
 
 """
-    gvf_ensemble!(H::Vector{Float64}, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
+    gvf_ensemble!(H, S, x, hbf, wbf, Qe, ne, re, ze)
 
 Generate an ensemble of water height profiles from Gradually-Varied-Flow simulations
 and associated profiles of bed elevation.
