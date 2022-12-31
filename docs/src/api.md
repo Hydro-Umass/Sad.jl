@@ -37,6 +37,7 @@
 
 ```@docs
 	Sad.froude
+	Sad.interpolate_hbc
 	Sad.dydx
 	Sad.gvf
 ```
@@ -44,6 +45,7 @@
 ### Sad
 
 ```@docs
+	Sad.drop_unobserved
 	Sad.assimilate
 	Sad.bathymetry!
 	Sad.ahg_constrain!

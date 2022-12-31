@@ -34,7 +34,7 @@ function lhs_ensemble(nens, args...)
 end
 
 """
-    prior_ensemble(x::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int)
+    prior_ensemble(x, Qp, np, rp, zp, nens)
 
 Generate a prior ensemble of discharge, roughness coefficient, channel shape parameter,
 and downstream bed elevation from provided distributions or sample data.

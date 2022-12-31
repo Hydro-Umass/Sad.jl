@@ -68,6 +68,8 @@ end
 Generate an ensemble of water height profiles from Gradually-Varied-Flow simulations
 and associated profiles of bed elevation.
 
+# Arguments
+
 - `H`: water surface elevation
 - `S`: bed slope
 - `x`: channel chainage
@@ -95,4 +97,26 @@ function gvf_ensemble!(hbc::Float64, S, x::Vector{Float64}, hbf::Vector{Float64}
         he[:, i] = gvf(Qe[i], (hbc-ze[1, i])*re[i]/(re[i] + 1), Se[:, i], ne[i], x, wbf, ybf[:, i], [re[i] for _ in 1:length(x)])
     end
     he
+end
+
+"""
+    interpolate_h(x, H, S)
+
+Interpolate water surface elevation boundary condition by assuming uniform flow, i.e., energy slope is equal to bed slope.
+
+# Arguments
+
+- `x`: channel chainage
+- `H`: water surface elevation profile
+- `S`: bed slope
+
+"""
+function interpolate_hbc(x::Vector{Float64}, H::Vector{FloatM}, S::Vector{Float64})
+    j = minimum(findall(.!ismissing.(H)))
+    h = zeros(j)
+    h[1] = H[j]
+    for k =2:j
+        h[k] = h[k-1] - S[j+2-k] * (x[j+2-k] - x[j+1-k])
+    end
+    h[end]
 end

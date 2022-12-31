@@ -14,14 +14,15 @@ include("priors.jl")
 include("kalman.jl")
 
 """
-    assimilate(H, W, x, wbf, hbf, S0, Qp, np, rp, zp, nens, constrain)
+    assimilate(H, W, S, x, wbf, hbf, S0, Qp, np, rp, zp, nens, constrain)
 
 Assimilate SWOT observations for river reach.
 
 # Arguments
 
-- `H`: water surface elevation
-- `W`: water surface width
+- `H`: time series of water surface elevation profiles
+- `W`: time series of water surface width profiles
+- `S`: time series of water surface slope profiles
 - `x`: downstream distance for each cross section
 - `wbf`: bankfull width
 - `hbf`: bankfull depth
@@ -33,54 +34,61 @@ Assimilate SWOT observations for river reach.
 - `constrain`: switch for applying AHG constraint
 
 """
-function assimilate(H, W, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, constrain::Bool=true)
+function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, constrain::Bool=true)
     seed!(1)
     min_ensemble_size = 5
     nt = size(H, 2)
     Qa = zeros(nt)
     Qu = zeros(nt)
     na = zeros(nt)
-    S = diff(H, dims=1) ./ diff(x)
-    S = [S[1, :]'; S]
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     for t in 1:nt
-        he = gvf_ensemble!(H[1, t], S0, x, hbf, wbf, Qe, ne, re, ze)
-        # find valid flow depths simulated
-        i = findall(he[1, :] .> 0)
-        if length(i) < min_ensemble_size
-            Sf = [S[j, t] > 0 ? S[j, t] : minimum(S[:, t][S[:, t] .> 0]) for j=1:length(x)]
-            he = [(Qe[e] .* ne[e]) ./ (W[j, t] .* Sf[j].^0.5).^(3/5) for j=1:length(x), e=1:nens]
-        end
-        i = findall(he[1, :] .> 0)
-        h = ze .+ he .* ((re .+ 1) ./ re)'
-        X = zeros(2, length(i))
-        X[1, :] = Qe[i]
-        X[2, :] = ne[i]
-        XA = h[:, i]
-        d = H[:, t]
-        # adaptive estimation of observation error covariance
-        E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
-        A = letkf(X, d, XA, E, diagR=true)
-        # if estimated discharge is negative, use a log transform in the assimilation
-        qm = mean(A[1, :])
-        if qm < 0
-            X[1, :] = log.(Qe[i])
+        if any(.!ismissing.(H[:, t])) # check if there are any valid observations
+            hbc = ismissing(H[1, t]) ? interpolate_hbc(x, H[:, t], S0) : H[1, t]
+            he = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qe, ne, re, ze)
+            # find valid flow depths simulated
+            i = findall(he[1, :] .> 0)
+            if length(i) < min_ensemble_size
+                Sf = [S[j, t] > 0 ? S[j, t] : minimum(S[:, t][S[:, t] .> 0]) for j=1:length(x)]
+                he = [(Qe[e] .* ne[e]) ./ (W[j, t] .* Sf[j].^0.5).^(3/5) for j=1:length(x), e=1:nens]
+            end
+            i = findall(he[1, :] .> 0)
+            h = ze .+ he .* ((re .+ 1) ./ re)'
+            X = zeros(2, length(i))
+            X[1, :] = Qe[i]
+            X[2, :] = ne[i]
+            j = findall(.!ismissing.(H[:, t]))
+            XA = h[j, i]
+            d = convert(Vector{Float64}, H[j, t])
+            # adaptive estimation of observation error covariance
+            E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
             A = letkf(X, d, XA, E, diagR=true)
-            A[1, :] .= exp.(A[1, :])
+            # if estimated discharge is negative, use a log transform in the assimilation
+            qm = mean(A[1, :])
+            if qm < 0
+                X[1, :] = log.(Qe[i])
+                A = letkf(X, d, XA, E, diagR=true)
+                A[1, :] .= exp.(A[1, :])
+            end
+            Aq = A[1, :]
+            if constrain
+                ahg_constrain!(Aq, hbc, hbf, wbf, S0, x, ne[i], re[i], ze[:, i])
+            end
+            Qa[t] = mean(Aq) > 0 ? mean(Aq) : mean(Aq[Aq .> 0])
+            Qu[t] = std(Aq)
+            An = A[2, :]
+            na[t] = mean(An) > 0 ? mean(An) : mean(An[An .> 0])
+        else
+            Qa[t] = -9999.0
+            Qu[t] = -9999.0
+            na[t] = -9999.0
         end
-        Aq = A[1, :]
-        if constrain
-            ahg_constrain!(Aq, H[1, t], hbf, wbf, S0, x, ne[i], re[i], ze[:, i])
-        end
-        Qa[t] = mean(Aq)
-        Qu[t] = std(Aq)
-        na[t] = mean(A[2, :])
     end
     Qa, Qu, na
 end
 
 """
-    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, H)
+    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, H, ϵₒ)
 
 Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water surface elevation observations.
 
@@ -110,7 +118,6 @@ function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float6
         E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
         E[E .< ϵₒ] .= ϵₒ
         A = letkf(X, d, XA, E, diagR=true)
-        # FIXME ensure that estimated bathymetry is plausible
         ze[:, i] .= A
         S = diff(ze, dims=1) ./ diff(x)
         S = [S[1, :]'; S]
@@ -186,15 +193,22 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 - `z`: bed elevation
 
 """
-function flow_parameters(Qa::Vector{Float64}, na::Vector{Float64}, x::Vector{Float64}, H::Vector{Float64}, W::Vector{Float64}, S::Vector{Float64}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
+function flow_parameters(Qa::Vector{Float64}, na::Vector{Float64}, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
+    # FIXME what are the observations used in the SWOT estimation of discharge?
+    Hm = mean.(skipmissing.(eachcol(H)))
+    Wm = mean.(skipmissing.(eachcol(W)))
+    Sm = mean.(skipmissing.(eachcol(S)))
+    Sm[Sm .< 0] .= mean(S0)
     ybf = hbf .- z
-    ha = zeros(length(Qa))
-    for t=1:length(Qa)
-        h = gvf(Qa[t], (H[t]-z[1])*r/(r+1), S0, na[t], x, wbf, ybf, [r for _ in 1:length(x)])
-        ha[t] = h[1]
+    valid = findall(.!isnan.(Hm))
+    ha = zeros(length(valid))
+    for (t, j) in enumerate(valid)
+        h = gvf(Qa[j], (Hm[j]-z[1])*r/(r+1), S0, na[j], x, wbf, ybf, [r for _ in 1:length(x)])
+        ha[t] = mean(h)
     end
-    A0 = (na .* Qa .* W.^(2/3) .* S.^(-1/2)).^(3/5) .- W .* ha
-    mean(A0), mean(na)
+    valid = [i for i in intersect(Set(valid), Set(valid[ha .> 0]))]
+    A0 = (na[valid] .* Qa[valid] .* Wm[valid].^(2/3) .* Sm[valid].^(-1/2)).^(3/5) .- Wm[valid] .* ha[ha .> 0]
+    mean(A0), mean(na[valid])
 end
 
 """
@@ -266,7 +280,7 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, Qp::
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
-    A0, n = flow_parameters(Qa, na, x, H[1, :], W[1, :], S[1, :], Sa, hbf, wbf, mean(re), za)
+    A0, n = flow_parameters(Qa, na, x, H, W, S, Sa, hbf, wbf, mean(re), za)
     Qa, Qu, A0, n
 end
 
