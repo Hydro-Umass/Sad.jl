@@ -1,5 +1,9 @@
 # Use cases
 
+!!! warning "Array ordering in SAD"
+`SAD` expects time series of hydraulic variable profiles as 2-D arrays, with the row dimension being the cross-sections from downstream (index 1) to upstream (last index) and the column dimension being time. The time for each column does not have to be continuous, as SAD operates on each one separately. Missing data are acceptable, but do use [Julia's missing data type](https://docs.julialang.org/en/v1/manual/missing/) instead of `NaN`. 
+
+
 ## Pepsi-1 experiment
 
 We start by loading the data, including river node information and synthetic SWOT observations
