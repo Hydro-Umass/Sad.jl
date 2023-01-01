@@ -96,3 +96,14 @@ Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp0, np0, rp0, zp0, 100, 1000)
 ![arial](./assets/arial_q.png)
 
 ## Confluence
+
+`Confluence` is the framework that will be operationally implementing the multiple discharge estimation algorithms (SAD being one of them) for SWOT. The priors are obtained from [SWORD](https://zenodo.org/record/7410433#.Y7F7-bLMJQI)
+
+```julia
+Dataset("../../data/sword/na_apriori_rivers_v07.nc") do f
+       g = NCDatasets.group(f, "nodes")
+       rid = g["reach_id"][:]
+       dists = g["dist_out"][:]
+end
+
+```

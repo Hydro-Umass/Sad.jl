@@ -1,4 +1,5 @@
 using Distributions
+using NCDatasets
 using Random: seed!
 using KernelDensity: kde
 using BlackBoxOptim.Utils: latin_hypercube_sampling
@@ -111,16 +112,38 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
 end
 
 """
-    priors(ncfile)
+    priors(ncfile, hmin, id)
 
 Derive prior distributions for discharge, roughness coefficient, channel shape parameter, and bed elevation by reading the [SWORD](http://gaia.geosci.unc.edu/SWORD/) a-priori database.
 
 # Arguments
 - `ncfile`: NetCDF file of SWORD database
+- `hmin`: minimum observed downstream water surface elevation
+- `id`: Reach ID in SWORD database
 
 """
-function priors(ncfile::String)
-    nothing
+function priors(ncfile::String, hmin::Float64, id::Int)
+    NCDataset(ncfile) do f
+        gr = NCDatasets.group(f, "reaches")
+        i = findall(gr["reach_id"][:] .== id)[1]
+        g = NCDatasets.group(NCDatasets.group(f, "gbpriors"), "reach")
+        n_l = exp(g["lowerbound_logn"][i])
+        n_u = exp(g["upperbound_logn"][i])
+        np = Uniform(n_l, n_u)
+        r_m = exp(g["logr_hat"][i])
+        r_s = exp(g["logr_sd"][i])
+        r_l = exp(g["lowerbound_logr"][i])
+        r_u = exp(g["upperbound_logr"][i])
+        rp = Truncated(Normal(r_m, r_s), r_l, r_u)
+        q_m = exp(g["logQc_hat"][i])
+        q_s = exp(g["logQc_sd"][i])
+        q_u = exp(g["upperbound_logQc"][i])
+        q_l = exp(g["lowerbound_logQc"][i])
+        qcv = q_s / q_m
+        Qp = Truncated(LogNormal(log(q_m)-qcv^2/2, qcv), q_l, q_u)
+        zp = Uniform(hmin-20, hmin)
+        Qp, np, rp, zp
+    end
 end
 
 """
