@@ -185,7 +185,7 @@ function ahg_constrain!(Qa::Vector{Float64}, hbc::Float64, hbf::Vector{Float64},
 end
 
 """
-    flow_parameters(Qa, na, x, H, W, S, S0, hbf, wbf, r, z)
+    flow_parameters(Qa, na, W, S, dA)
 
 Estimate flow parameters (roughness coefficient and baseflow cross-sectional area) from assimilated discharge.
 
@@ -193,15 +193,9 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 
 - `Qa`: time series of estimated discharge
 - `na`: time series of estimate roughness coefficient
-- `x`: channel chainage
-- `H`: time series of observed water surface elevation (reach)
 - `W`: time series of observed width (reach)
 - `S`: time series of observed slope (reach)
-- `S0`: bed slope
-- `hbf`: bankfull water surface elevation
-- `wbf`: bankfull width
-- `r`: channel shape parameter
-- `z`: bed elevation
+- `dA`: time series of changes in reach-averaged cross-sectional area (from minimum observed)
 
 """
 function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Vector{FloatM})
