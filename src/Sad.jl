@@ -204,22 +204,16 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 - `z`: bed elevation
 
 """
-function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
+function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Vector{FloatM})
     # FIXME what are the observations used in the SWOT estimation of discharge?
-    Hm = mean.(skipmissing.(eachcol(H)))
+    # Should they be reach data or averaged node data here?
     Wm = mean.(skipmissing.(eachcol(W)))
     Sm = mean.(skipmissing.(eachcol(S)))
-    Sm[Sm .< 0] .= mean(S0)
-    ybf = hbf .- z
-    valid = findall(.!isnan.(Hm))
-    ha = zeros(length(valid))
-    for (t, j) in enumerate(valid)
-        h = gvf(Qa[j], (Hm[j]-z[1])*r/(r+1), S0, na[j], x, wbf, ybf, [r for _ in 1:length(x)])
-        ha[t] = mean(h)
-    end
-    valid = [i for i in intersect(Set(valid), Set(valid[ha .> 0]))]
-    A0 = (na[valid] .* Qa[valid] .* Wm[valid].^(2/3) .* Sm[valid].^(-1/2)).^(3/5) .- Wm[valid] .* ha[ha .> 0]
-    mean(A0), mean(na[valid])
+    A0 = (na .* Qa).^(3/5) .* Wm.^(2/5) .* Sm.^(-3/10) .- dA
+    A0 = mean(skipmissing(A0))
+    n = mean(skipmissing(na))
+    # catch implausible negative value of A0
+    A0 > 0 ? A0 : 0.0, n
 end
 
 """
@@ -270,7 +264,7 @@ function calc_bed_slope(x::Vector{Float64}, S::Matrix{FloatM})
 end
 
 """
-    calc_dA(Qa, na, za, H, W, S, wbf, hbf, S0, r)
+    calc_dA(Qa, na, W, S)
 
 Calculate changes in cross-sectional area.
 
@@ -278,29 +272,17 @@ Calculate changes in cross-sectional area.
 
 - `Qa`: time series of estimated discharge
 - `na`: time series of estimated roughness coefficient
-- `za`: estimated bed elevation
-- `H`: time series of water surface elevation profiles
 - `W`: time series of width profiles
 - `S`: time series of water surface slope profiles
-- `wbf`: bankfull width profile
-- `hbf`: bankfull water surface elevation profile
-- `S0`: channel bed slope
-- `r`: channel shape parameter
 
 """
-function calc_dA(Qa::Vector{FloatM}, na::Vector{FloatM}, za::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, wbf::Vector{Float64}, hbf::Vector{Float64}, S0::Vector{Float64}, r::Float64)
-    ybf = hbf .- za
-    w = zeros(length(Qa))
-    for t=1:length(w)
-        ym = (mean(W[:, t] ./ wbf .* ybf))^r
-        xs = Dingman(mean(wbf), mean(ybf), ym, r, mean(S0), na[t])
-        w[t] = width(xs)
-    end
+function calc_dA(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM})
+    Wm = mean.(skipmissing.(eachcol(W)))
     Sm = mean.(skipmissing.(eachcol(S)))
-    Hm = mean.(skipmissing.(eachcol(H)))
-    A = (na .* Qa .* w.^(2/3) .* Sm.^(-1/2)).^(3/5)
-    i = argmin(Hm)
-    A .- A[i]
+    A = (na .* Qa .* Wm.^(2/3) .* Sm.^(-1/2)).^(3/5)
+    Amin = minimum(skipmissing(A))
+    dA = convert(Vector{FloatM}, A .- Amin)
+    dA
 end
 
 """
@@ -321,7 +303,7 @@ Estimate discharge and flow parameters from SWOT observations.
 - `nsamples`: sample size for rejection sampling
 
 """
-function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
+function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Union{Vector{FloatM}, Missing}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
     x, H, W = drop_unobserved(x, H, W)
     wbf = maximum.(skipmissing.(eachrow(W)))
     hbf = maximum.(skipmissing.(eachrow(H)))
@@ -335,8 +317,10 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
-    dA = calc_dA(Qa, na, za, H, W, S, wbf, hbf, S0, mean(re))
-    A0, n = flow_parameters(Qa, na, x, H, W, S, Sa, hbf, wbf, mean(re), za)
+    if ismissing(dA)
+        dA = calc_dA(Qa, na, W, S)
+    end
+    A0, n = flow_parameters(Qa, na, W, S, dA)
     Qa, Qu, A0, n
 end
 
@@ -349,6 +333,5 @@ export
     rejection_sampling,
     prior_ensemble,
     assimilate
-
 
 end

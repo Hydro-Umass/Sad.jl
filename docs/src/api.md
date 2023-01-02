@@ -49,6 +49,8 @@
 	Sad.assimilate
 	Sad.bathymetry!
 	Sad.ahg_constrain!
+	Sad.calc_bed_slope
+	Sad.calc_dA
 	Sad.flow_parameters
 	Sad.estimate
 ```

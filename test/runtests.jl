@@ -52,7 +52,8 @@ Qa, Qu, na = Sad.assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
 za = zeros(length(x))
 za[1] = mean(zp)
 for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
-A0, n = Sad.flow_parameters(Qa, na, x, H, W, S, Sa, hbf, wbf, mean(re), za)
+dA = Sad.calc_dA(Qa, na, W, S)
+A0, n = Sad.flow_parameters(Qa, na, W, S, dA)
 
 @testset "estimation" begin
     @test mean(Qa) > 0
