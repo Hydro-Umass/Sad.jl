@@ -217,7 +217,7 @@ function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{Float
 end
 
 """
-    drop_unobserved(x, H, W)
+    drop_unobserved(x, H, W, S)
 
 Remove cross sections with no valid observations.
 
@@ -226,11 +226,12 @@ Remove cross sections with no valid observations.
 - `x`: channel chainage
 - `H`: time series of water surface elevation profiles
 - `W`: time series of width profiles
+- `S`: time series of water surface slope profiles
 
 """
-function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM})
+function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM})
     i = [j for j=1:size(H, 1) if !all(ismissing.(H[j, :]))]
-    x[i], H[i, :], W[i, :]
+    x[i] .- minimum(x[i]), H[i, :], W[i, :], S[i, :]
 end
 
 """
@@ -304,7 +305,6 @@ Estimate discharge and flow parameters from SWOT observations.
 
 """
 function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Union{Vector{FloatM}, Missing}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
-    x, H, W = drop_unobserved(x, H, W)
     wbf = maximum.(skipmissing.(eachrow(W)))
     hbf = maximum.(skipmissing.(eachrow(H)))
     S0 = calc_bed_slope(x, S)

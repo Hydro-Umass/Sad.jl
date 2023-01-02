@@ -25,6 +25,7 @@ S = diff(H, dims=1) ./ diff(x)
 S = [S[1, :]'; S]
 S0 = mean(S, dims=2)[:, 1]
 S = convert(Matrix{Sad.FloatM}, S)
+x, H, W, S = Sad.drop_unobserved(x, H, W, S)
 
 # perform estimation
 nens = 20
