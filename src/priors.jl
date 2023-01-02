@@ -136,11 +136,9 @@ function priors(ncfile::String, hmin::Float64, id::Int)
         r_u = exp(g["upperbound_logr"][i])
         rp = Truncated(Normal(r_m, r_s), r_l, r_u)
         q_m = exp(g["logQc_hat"][i])
-        q_s = exp(g["logQc_sd"][i])
         q_u = exp(g["upperbound_logQc"][i])
         q_l = exp(g["lowerbound_logQc"][i])
-        qcv = q_s / q_m
-        Qp = Truncated(LogNormal(log(q_m)-qcv^2/2, qcv), q_l, q_u)
+        Qp = Truncated(LogNormal(log(q_m)-2.0^2/2, 2.0), q_l, q_u)
         zp = Uniform(hmin-20, hmin)
         Qp, np, rp, zp
     end
@@ -160,7 +158,6 @@ function priors(qwbm::Float64, hmin::Float64, class::River)
     rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
     Qp = truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
     np = Uniform(0.01, 0.07)
-    # rp = truncated(Normal(2.5, 0.5), 0.5, 20.0)
     rp = Uniform(rbnds[Int(class)]...)
     zp = Uniform(hmin-20, hmin)
     Qp, np, rp, zp
