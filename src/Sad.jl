@@ -93,6 +93,7 @@ end
 Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water surface elevation observations.
 
 # Arguments
+
 - `ze`: ensemble of bed elevations
 - `S`: time series of water surface slope profiles
 - `S0`: bed slope
@@ -141,6 +142,7 @@ end
 Constrain assimilated discharge with At-a-Station hydraulic geometry (AHG) relationships.
 
 # Arguments
+
 - `Qa`: assimilated ensemble discharge
 - `hbc`: downstream boundary water surface elevation
 - `hbf`: bankfull water surface elevation
@@ -188,6 +190,7 @@ end
 Estimate flow parameters (roughness coefficient and baseflow cross-sectional area) from assimilated discharge.
 
 # Arguments
+
 - `Qa`: time series of estimated discharge
 - `na`: time series of estimate roughness coefficient
 - `x`: channel chainage
@@ -225,6 +228,7 @@ end
 Remove cross sections with no valid observations.
 
 # Arguments
+
 - `x`: channel chainage
 - `H`: time series of water surface elevation profiles
 - `W`: time series of width profiles
@@ -235,6 +239,17 @@ function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM
     x[i], H[i, :], W[i, :]
 end
 
+"""
+    calc_bed_slope(x, S)
+
+Estimate initial channel bed slope.
+
+# Arguments
+
+- `x`: channel chainage
+- `S`: time series of water surface slope profiles
+
+"""
 function calc_bed_slope(x::Vector{Float64}, S::Matrix{FloatM})
     # calculate initial bed slope as the mean water surface slope
     # when data are missing, we may end up with negative slopes which
