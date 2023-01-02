@@ -88,13 +88,14 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
 end
 
 """
-    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, H, ϵₒ)
+    bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, H, ϵₒ)
 
 Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water surface elevation observations.
 
 # Arguments
 - `ze`: ensemble of bed elevations
-- `Se`: ensemble of bed slopes
+- `S`: time series of water surface slope profiles
+- `S0`: bed slope
 - `Qe`: ensemble of discharge
 - `ne`: ensemble of roughness coefficient
 - `re`: ensemble of channel shape parameters
@@ -105,8 +106,15 @@ Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water su
 - `ϵₒ`: observation error (default value of 10 cm)
 
 """
-function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, ϵₒ::Float64=0.1)
+function bathymetry!(ze::Matrix{Float64}, S::Matrix{FloatM}, S0::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, ϵₒ::Float64=0.1)
     seed!(1)
+    nens = size(ze, 2)
+    Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
+    for k=1:length(x)
+        Se[k, ismissing.(Se[k, :])] .= S0[k]
+        Se[k, Se[k, :] .< 0] .= S0[k]
+    end
+    Se = convert(Matrix{Float64}, Se)
     min_ensemble_size = 5
     he = gvf_ensemble!(H[1], Se, x, hbf, wbf, Qe, ne, re, ze)
     i = findall(he[1, :] .> 0)
@@ -116,15 +124,15 @@ function bathymetry!(ze::Matrix{Float64}, Se::Matrix{Float64}, Qe::Vector{Float6
         XA = h[:, i]
         d = H
         E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
-        E[E .< ϵₒ] .= ϵₒ
+        E[E .> ϵₒ] .= ϵₒ
         A = letkf(X, d, XA, E, diagR=true)
         ze[:, i] .= A
         S = diff(ze, dims=1) ./ diff(x)
         S = [S[1, :]'; S]
         for k=1:length(x) S[k, S[k, :] .< 0] .= minimum(Se[k, :]) end
-        Se .= S
+        Se = S
     end
-    nothing
+    Se
 end
 
 """
@@ -227,29 +235,7 @@ function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM
     x[i], H[i, :], W[i, :]
 end
 
-"""
-    estimate(x, H, W, Qp, np, rp, zp, nens)
-
-Estimate discharge and flow parameters from SWOT observations.
-
-# Arguments
-- `x`: channel chainage
-- `H`: time series of water surface elevation profiles
-- `W`:time series of width profiles
-- `Qp`: discharge prior distribution
-- `np`: roughness coefficient prior distribution
-- `rp`: channel shape parameter prior distribution
-- `zp`: downstream bed elevation prior distribution
-- `nens`: ensemble size
-- `nsamples`: sample size for rejection sampling
-
-"""
-function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
-    x, H, W = drop_unobserved(x, H, W)
-    wbf = maximum.(skipmissing.(eachrow(W)))
-    hbf = maximum.(skipmissing.(eachrow(H)))
-    S = diff(H, dims=1) ./ diff(x)
-    S = [S[1, :]'; S]
+function calc_bed_slope(x::Vector{Float64}, S::Matrix{FloatM})
     # calculate initial bed slope as the mean water surface slope
     # when data are missing, we may end up with negative slopes which
     # can cause numerical instabilities in the GVF model so we use either
@@ -265,15 +251,35 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, Qp::
             S0[k] = mean(s[s .> 0])
         end
     end
+    S0
+end
+
+"""
+    estimate(x, H, W, S, Qp, np, rp, zp, nens)
+
+Estimate discharge and flow parameters from SWOT observations.
+
+# Arguments
+- `x`: channel chainage
+- `H`: time series of water surface elevation profiles
+- `W`:time series of width profiles
+- `S`: time series of water surface slope profiles
+- `Qp`: discharge prior distribution
+- `np`: roughness coefficient prior distribution
+- `rp`: channel shape parameter prior distribution
+- `zp`: downstream bed elevation prior distribution
+- `nens`: ensemble size
+- `nsamples`: sample size for rejection sampling
+
+"""
+function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
+    x, H, W = drop_unobserved(x, H, W)
+    wbf = maximum.(skipmissing.(eachrow(W)))
+    hbf = maximum.(skipmissing.(eachrow(H)))
+    S0 = calc_bed_slope(x, S)
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
-    Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
-    for k=1:length(x)
-        Se[k, ismissing.(Se[k, :])] .= S0[k]
-        Se[k, Se[k, :] .< 0] .= S0[k]
-    end
-    Se = convert(Matrix{Float64}, Se)
-    bathymetry!(ze, Se, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
+    Se = bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
     zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(skipmissing(H[1, :])))
     Sa = mean(Se, dims=2)[:, 1]
     Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
