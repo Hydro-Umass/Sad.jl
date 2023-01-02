@@ -270,6 +270,40 @@ function calc_bed_slope(x::Vector{Float64}, S::Matrix{FloatM})
 end
 
 """
+    calc_dA(Qa, na, za, H, W, S, wbf, hbf, S0, r)
+
+Calculate changes in cross-sectional area.
+
+# Arguments
+
+- `Qa`: time series of estimated discharge
+- `na`: time series of estimated roughness coefficient
+- `za`: estimated bed elevation
+- `H`: time series of water surface elevation profiles
+- `W`: time series of width profiles
+- `S`: time series of water surface slope profiles
+- `wbf`: bankfull width profile
+- `hbf`: bankfull water surface elevation profile
+- `S0`: channel bed slope
+- `r`: channel shape parameter
+
+"""
+function calc_dA(Qa::Vector{FloatM}, na::Vector{FloatM}, za::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, wbf::Vector{Float64}, hbf::Vector{Float64}, S0::Vector{Float64}, r::Float64)
+    ybf = hbf .- za
+    w = zeros(length(Qa))
+    for t=1:length(w)
+        ym = (mean(W[:, t] ./ wbf .* ybf))^r
+        xs = Dingman(mean(wbf), mean(ybf), ym, r, mean(S0), na[t])
+        w[t] = width(xs)
+    end
+    Sm = mean.(skipmissing.(eachcol(S)))
+    Hm = mean.(skipmissing.(eachcol(H)))
+    A = (na .* Qa .* w.^(2/3) .* Sm.^(-1/2)).^(3/5)
+    i = argmin(Hm)
+    A .- A[i]
+end
+
+"""
     estimate(x, H, W, S, Qp, np, rp, zp, nens)
 
 Estimate discharge and flow parameters from SWOT observations.
@@ -301,6 +335,7 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
+    dA = calc_dA(Qa, na, za, H, W, S, wbf, hbf, S0, mean(re))
     A0, n = flow_parameters(Qa, na, x, H, W, S, Sa, hbf, wbf, mean(re), za)
     Qa, Qu, A0, n
 end
