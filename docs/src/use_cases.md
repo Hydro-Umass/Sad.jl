@@ -85,16 +85,18 @@ W[W .== -9999.0] .= missing
 The water surface elevations for a SWOT satellite overpass are shown in the figure below
 ![overpass](./assets/arial_h.png)
 
-We will get the prior distributions
+We will get the prior distributions and calculate surface water slopes
 
 ```julia
 Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(skipmissing(H[1, :])), Sad.braided)
+S = diff(H, dims=1) ./ diff(x)
+S = [S[1, :]'; S]
 ```
 
 and then estimate discharge and flow parameters
 
 ```julia
-Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp0, np0, rp0, zp0, 100, 1000)
+Qa, Qu, A0, n = Sad.estimate(x, H, W, S, Qp0, np0, rp0, zp0, 100, 1000)
 ```
 
 ![arial](./assets/arial_q.png)
@@ -103,11 +105,32 @@ Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp0, np0, rp0, zp0, 100, 1000)
 
 `Confluence` is the framework that will be operationally implementing the multiple discharge estimation algorithms (SAD being one of them) for SWOT. The priors are obtained from [SWORD](https://zenodo.org/record/7410433#.Y7F7-bLMJQI)
 
+We start by setting the necessary file names and reading the river reach information
 ```julia
-Dataset("../../data/sword/na_apriori_rivers_v07.nc") do f
-	   g = NCDatasets.group(f, "nodes")
-	   rid = g["reach_id"][:]
-	   dists = g["dist_out"][:]
-end
+swordfile = "../../data/sword/na_sword_v14.nc"
+sosfile = "../../data/sos/na_sword_v11_SOS_priors_dylan.nc"
+reachid = 74267400111
+nids, x = river_info(reachid, swordfile)
+```
 
+Then we read the SWOT observations and remove any cross sections that do not have any valid observations
+
+```julia
+H, W, S, dA = read_swot_obs(swotfile, nids)
+x, H, W, S = Sad.drop_unobserved(x, H, W, S)
+```
+
+The priors are estimated next
+
+```julia
+Hmin = minimum(skipmissing(H[1, :]))
+Qp, np, rp, zp = Sad.priors(sosfile, Hmin, reachid)
+```
+
+Finally, we estimate discharge and the flow parameters
+
+```julia
+nens = 100
+nsamples = 1000
+Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples)
 ```
