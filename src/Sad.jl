@@ -38,9 +38,9 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
     seed!(1)
     min_ensemble_size = 5
     nt = size(H, 2)
-    Qa = zeros(nt)
-    Qu = zeros(nt)
-    na = zeros(nt)
+    Qa = zeros(FloatM, nt)
+    Qu = zeros(FloatM, nt)
+    na = zeros(FloatM, nt)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     for t in 1:nt
         if any(.!ismissing.(H[:, t])) # check if there are any valid observations
@@ -79,9 +79,9 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
             An = A[2, :]
             na[t] = mean(An) > 0 ? mean(An) : mean(An[An .> 0])
         else
-            Qa[t] = -9999.0
-            Qu[t] = -9999.0
-            na[t] = -9999.0
+            Qa[t] = missing
+            Qu[t] = missing
+            na[t] = missing
         end
     end
     Qa, Qu, na
@@ -201,7 +201,7 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 - `z`: bed elevation
 
 """
-function flow_parameters(Qa::Vector{Float64}, na::Vector{Float64}, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
+function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, r::Float64, z::Vector{Float64})
     # FIXME what are the observations used in the SWOT estimation of discharge?
     Hm = mean.(skipmissing.(eachcol(H)))
     Wm = mean.(skipmissing.(eachcol(W)))
