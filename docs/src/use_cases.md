@@ -1,7 +1,7 @@
 # Use cases
 
 !!! warning "Array ordering in SAD"
-`SAD` expects time series of hydraulic variable profiles as 2-D arrays, with the row dimension being the cross-sections from downstream (index 1) to upstream (last index) and the column dimension being time. The time for each column does not have to be continuous, as SAD operates on each one separately. Missing data are acceptable, but do use [Julia's missing data type](https://docs.julialang.org/en/v1/manual/missing/) instead of `NaN`. 
+	`SAD` expects time series of hydraulic variable profiles as 2-D arrays, with the row dimension being the cross-sections from downstream (index 1) to upstream (last index) and the column dimension being time. The time for each column does not have to be continuous, as SAD operates on each one separately. Missing data are acceptable, but do use [Julia's missing data type](https://docs.julialang.org/en/v1/manual/missing/) instead of `NaN`.
 
 
 ## Pepsi-1 experiment
@@ -105,9 +105,9 @@ Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp0, np0, rp0, zp0, 100, 1000)
 
 ```julia
 Dataset("../../data/sword/na_apriori_rivers_v07.nc") do f
-       g = NCDatasets.group(f, "nodes")
-       rid = g["reach_id"][:]
-       dists = g["dist_out"][:]
+	   g = NCDatasets.group(f, "nodes")
+	   rid = g["reach_id"][:]
+	   dists = g["dist_out"][:]
 end
 
 ```
