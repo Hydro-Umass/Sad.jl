@@ -38,13 +38,16 @@ Load SWOT observations.
 function read_swot_obs(ncfile::String, nids::Vector{Int})
     Dataset(ncfile) do ds
         nodes = NCDatasets.group(ds, "node")
-        S = nodes["slope2"][:]
-        H = nodes["wse"][:]
-        W = nodes["width"][:]
+        reaches = NCDatasets.group(ds, "reach")
+        S = permutedims(nodes["slope2"][:])
+        H = permutedims(nodes["wse"][:])
+        W = permutedims(nodes["width"][:])
+        dA = reaches["d_x_area"][1, :]
+        dA = convert(Union{Vector{Sad.FloatM}, Missing}, dA)
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
-        i = [dd[k] for k in nid]
-        H[:, i]', W[:, i]', S[:, i]'
+        i = [dmap[k] for k in nids]
+        H[i, :], W[i, :], S[i, :], dA
     end
 end
 
@@ -114,7 +117,8 @@ function main()
     reachid, swotfile, swordfile = get_reach_files(indir, reachfile)
 
     nids, x = river_info(reachid, swordfile)
-    H, W, S = read_swot_obs(swotfile, nids)
+    H, W, S, dA = read_swot_obs(swotfile, nids)
+    x, H, W, S = Sad.drop_unobserved(x, H, W, S)
     A0 = missing
     n = missing
     Qa = Array{Missing}(missing, 1, size(W,1))
@@ -132,7 +136,7 @@ function main()
             try
                 nens = 100 # default ensemble size
                 nsamples = 1000 # default sampling size
-                Qa, Qu, A0, n = Sad.estimate(x, H, W, Qp, np, rp, zp, nens, nsamples)
+                Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples)
                 println("$(reachid): VALID")
                 write_output(reachid, 1, outdir, A0, n, Qa, Qu)
             catch
