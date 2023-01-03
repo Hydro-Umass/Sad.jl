@@ -20,7 +20,7 @@ function get_reach_files(indir, reachjson)
     open(joinpath(indir, reachjson)) do jf
         data = read(jf, String)
         reachlist = JSON.parse(data)[line]
-        reachlist["reach_id"], joinpath(indir, "swot", reachlist["swot"]), joinpath(indir, "sos", reachlist["sos"])
+        reachlist["reach_id"], joinpath(indir, "swot", reachlist["swot"]), joinpath(indir, "sos", reachlist["sos"]), joinpath(indir, "sword", reachlist["sword"])
     end
 end
 
@@ -42,7 +42,7 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         S = permutedims(nodes["slope2"][:])
         H = permutedims(nodes["wse"][:])
         W = permutedims(nodes["width"][:])
-        dA = reaches["d_x_area"][1, :]
+        dA = reaches["d_x_area"][:]
         dA = convert(Union{Vector{Sad.FloatM}, Missing}, dA)
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
@@ -89,7 +89,7 @@ function write_output(reachid, valid, outdir, A0, n, Qa, Qu)
     outfile = joinpath(outdir, "$(reachid)_sad.nc")
     out = Dataset(outfile, "c")
     out.attrib["valid"] = valid   # FIXME Determine what is considered valid in the context of a SAD run
-    defDim(out, "nt", size(Qa,2))
+    defDim(out, "nt", length(Qa))
     ridv = defVar(out, "reach_id", Int64, (), fillvalue = FILL)
     ridv[:] = reachid
     A0v = defVar(out, "A0", Float64, (), fillvalue = FILL)
@@ -97,9 +97,9 @@ function write_output(reachid, valid, outdir, A0, n, Qa, Qu)
     nv = defVar(out, "n", Float64, (), fillvalue = FILL)
     nv[:] = n
     Qav = defVar(out, "Qa", Float64, ("nt",), fillvalue = FILL)
-    Qav[:,:] = replace!(Qa, NaN=>FILL)
+    Qav[:] = replace!(Qa, NaN=>FILL)
     Quv = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
-    Quv[:,:] = Qu
+    Quv[:] = Qu
     close(out)
 end
 
@@ -114,7 +114,7 @@ function main()
     outdir = joinpath("/mnt", "data", "output")
 
     reachfile = isempty(ARGS) ? "reaches.json" : reachfile = ARGS[1]
-    reachid, swotfile, swordfile = get_reach_files(indir, reachfile)
+    reachid, swotfile, sosfile, swordfile = get_reach_files(indir, reachfile)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA = read_swot_obs(swotfile, nids)
@@ -129,7 +129,7 @@ function main()
     else
         Hmin = minimum(skipmissing(H[1, :]))
         Qp, np, rp, zp = Sad.priors(sosfile, Hmin, reachid)
-        if ismissing(Qₚ)
+        if ismissing(Qp)
             println("$(reachid): INVALID, missing mean discharge")
             write_output(reachid, 0, outdir, A0, n, Qa, Qu)
         else
