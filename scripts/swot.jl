@@ -44,10 +44,13 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         W = permutedims(nodes["width"][:])
         dA = reaches["d_x_area"][:]
         dA = convert(Union{Vector{Sad.FloatM}, Missing}, dA)
+        Hr = convert(Vector{Sad.FloatM}, reaches["wse"][:])
+        Wr = convert(Vector{Sad.FloatM}, reaches["width"][:])
+        Sr = convert(Vector{Sad.FloatM}, reaches["slope2"][:])
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
         i = [dmap[k] for k in nids]
-        H[i, :], W[i, :], S[i, :], dA
+        H[i, :], W[i, :], S[i, :], dA, Hr, Wr, Sr
     end
 end
 
@@ -117,7 +120,7 @@ function main()
     reachid, swotfile, sosfile, swordfile = get_reach_files(indir, reachfile)
 
     nids, x = river_info(reachid, swordfile)
-    H, W, S, dA = read_swot_obs(swotfile, nids)
+    H, W, S, dA, Hr, Wr, Sr = read_swot_obs(swotfile, nids)
     x, H, W, S = Sad.drop_unobserved(x, H, W, S)
     A0 = missing
     n = missing
