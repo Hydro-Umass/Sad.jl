@@ -204,6 +204,7 @@ function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{Float
     Wm = mean.(skipmissing.(eachcol(W)))
     Sm = mean.(skipmissing.(eachcol(S)))
     A0 = (na .* Qa).^(3/5) .* Wm.^(2/5) .* Sm.^(-3/10) .- dA
+    A0 = A0[.!isnan.(A0)]
     A0 = mean(skipmissing(A0))
     n = mean(skipmissing(na))
     # catch implausible negative value of A0
