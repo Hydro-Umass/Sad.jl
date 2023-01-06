@@ -69,3 +69,25 @@ nse(o, m) = 1 - sum((o .- m).^2) / sum((o .- mean(o)).^2)
     @test n > 0.01 && n < 0.07
     @test nse(Q[1, :], Qa) > 0.9
 end
+
+f = Dataset("missingdata.nc")
+g = NCDatasets.group(f, "XS_Timeseries")
+qwbm = NCDatasets.group(f, "River_Info")["QWBM"][1]
+x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
+Q = g["Q"][:][end:-1:1, :]
+H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
+W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
+H[H .== -9999.0] .= missing
+W[W .== -9999.0] .= missing
+S = diff(H, dims=1) ./ diff(x)
+S = [S[1, :]'; S]
+x, H, W, S = Sad.drop_unobserved(x, H, W, S)
+Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(skipmissing(H[1, :])), Sad.braided)
+Qa, Qu, A0, n = Sad.estimate(x, H, W, S, nothing, Qp0, np0, rp0, zp0, nens, nsamples, nothing, nothing, nothing)
+
+@testset "missing data" begin
+    @test length(findall(ismissing.(Qa))) == 315
+    @test A0 > 0
+    @test n > 0.01 && n < 0.07
+end
+
