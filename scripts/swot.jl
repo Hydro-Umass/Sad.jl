@@ -139,7 +139,7 @@ function main()
             try
                 nens = 100 # default ensemble size
                 nsamples = 1000 # default sampling size
-                Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples)
+                Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples, Hr, Wr, Sr)
                 println("$(reachid): VALID")
                 write_output(reachid, 1, outdir, A0, n, Qa, Qu)
             catch
