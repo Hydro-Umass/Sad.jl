@@ -43,7 +43,7 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         H = permutedims(nodes["wse"][:])
         W = permutedims(nodes["width"][:])
         dA = reaches["d_x_area"][:]
-        dA = convert(Union{Vector{Sad.FloatM}, Missing}, dA)
+        dA = convert(Vector{Sad.FloatM}, dA)
         Hr = convert(Vector{Sad.FloatM}, reaches["wse"][:])
         Wr = convert(Vector{Sad.FloatM}, reaches["width"][:])
         Sr = convert(Vector{Sad.FloatM}, reaches["slope2"][:])
