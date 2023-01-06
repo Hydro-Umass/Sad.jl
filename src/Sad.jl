@@ -34,7 +34,7 @@ Assimilate SWOT observations for river reach.
 - `constrain`: switch for applying AHG constraint
 
 """
-function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, constrain::Bool=true)
+function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, Hr::Union{Vector{FloatM}, Nothing}, constrain::Bool=true)
     seed!(1)
     min_ensemble_size = 5
     nt = size(H, 2)
@@ -58,8 +58,14 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
             X[1, :] = Qe[i]
             X[2, :] = ne[i]
             j = findall(.!ismissing.(H[:, t]))
-            XA = h[j, i]
-            d = convert(Vector{Float64}, H[j, t])
+            if isnothing(Hr)
+                XA = h[j, i]
+                d = convert(Vector{Float64}, H[j, t])
+            else
+                XA = zeros(1, length(i))
+                XA[:] = mean(h[j, i], dims=1)
+                d = [Hr[t]]
+            end
             # adaptive estimation of observation error covariance
             E = (((d .- mean(XA,dims=2)).^2 .- std(XA, dims=2).^2))
             A = letkf(X, d, XA, E, diagR=true)
@@ -198,13 +204,9 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 - `dA`: time series of changes in reach-averaged cross-sectional area (from minimum observed)
 
 """
-function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Vector{FloatM})
-    # FIXME what are the observations used in the SWOT estimation of discharge?
-    # Should they be reach data or averaged node data here?
-    Wm = mean.(skipmissing.(eachcol(W)))
-    Sm = mean.(skipmissing.(eachcol(S)))
-    A0 = (na .* Qa).^(3/5) .* Wm.^(2/5) .* Sm.^(-3/10) .- dA
-    A0 = A0[.!isnan.(A0)]
+function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, Wm::Vector{FloatM}, Sm::Vector{FloatM}, dA::Vector{FloatM})
+    i = findall(Sm .> 0)
+    A0 = (na[i] .* Qa[i]).^(3/5) .* Wm[i].^(2/5) .* Sm[i].^(-3/10) .- dA[i]
     A0 = mean(skipmissing(A0))
     n = mean(skipmissing(na))
     # catch implausible negative value of A0
@@ -299,7 +301,7 @@ Estimate discharge and flow parameters from SWOT observations.
 - `nsamples`: sample size for rejection sampling
 
 """
-function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Union{Vector{FloatM}, Missing}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int)
+function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, dA::Union{Vector{FloatM}, Nothing}, Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, nens::Int, nsamples::Int, Hr::Union{Vector{FloatM}, Nothing}=nothing, Wr::Union{Vector{FloatM}, Nothing}=nothing, Sr::Union{Vector{FloatM}, Nothing}=nothing)
     wbf = maximum.(skipmissing.(eachrow(W)))
     hbf = maximum.(skipmissing.(eachrow(H)))
     S0 = calc_bed_slope(x, S)
@@ -308,7 +310,7 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     Se = bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
     zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(skipmissing(H[1, :])))
     Sa = mean(Se, dims=2)[:, 1]
-    Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
+    Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens, Hr, false)
     # diagnose discharge and roughness coefficient
     Qa[Qa .< minimum(Qp)] .= minimum(Qp)
     Qa[Qa .> maximum(Qp)] .= maximum(Qp)
@@ -316,10 +318,12 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
-    if ismissing(dA)
+    if isnothing(dA)
         dA = calc_dA(Qa, na, W, S)
     end
-    A0, n = flow_parameters(Qa, na, W, S, dA)
+    Wm = isnothing(Wr) ? mean.(skipmissing.(eachcol(W))) : Wr
+    Sm = isnothing(Sr) ? mean.(skipmissing.(eachcol(S))) : Sr
+    A0, n = flow_parameters(Qa, na, convert(Vector{FloatM}, Wm), convert(Vector{FloatM}, Sm), dA)
     Qa, Qu, A0, n
 end
 
