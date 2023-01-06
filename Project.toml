@@ -1,7 +1,7 @@
 name = "Sad"
 uuid = "86303e7b-04d2-42a2-bc71-7ba20542e124"
 authors = ["Kostas Andreadis"]
-version = "0.1.0"
+version = "1.0.0"
 
 [deps]
 BlackBoxOptim = "a134a8b2-14d6-55f6-9291-3336d3ab0209"
