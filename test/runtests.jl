@@ -28,8 +28,8 @@ S = convert(Matrix{Sad.FloatM}, S)
 x, H, W, S = Sad.drop_unobserved(x, H, W, S)
 
 # perform estimation
-nens = 20
-nsamples = 20
+nens = 100
+nsamples = 1000
 Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(H[1, :]), Sad.sinuous)
 Qp, np, rp, zp = Sad.rejection_sampling(Qp0, np0, rp0, zp0, x, H, S0, wbf, hbf, nens, nsamples)
 Qe, ne, re, ze = Sad.prior_ensemble(x, Qp, np, rp, zp, nens)
@@ -49,12 +49,16 @@ Sa = mean(Se, dims=2)[:, 1]
     @test mean(Sa) isa Real
 end
 
-Qa, Qu, na = Sad.assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens)
+Qa, Qu, na = Sad.assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens, nothing)
 za = zeros(length(x))
 za[1] = mean(zp)
 for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
 dA = Sad.calc_dA(Qa, na, W, S)
-A0, n = Sad.flow_parameters(Qa, na, W, S, dA)
+Wm = mean.(skipmissing.(eachcol(W)))
+Sm = mean.(skipmissing.(eachcol(S)))
+A0, n = Sad.flow_parameters(Qa, na, convert(Vector{Sad.FloatM}, Wm), convert(Vector{Sad.FloatM}, Sm), dA)
+
+nse(o, m) = 1 - sum((o .- m).^2) / sum((o .- mean(o)).^2)
 
 @testset "estimation" begin
     @test mean(Qa) > 0
@@ -63,4 +67,5 @@ A0, n = Sad.flow_parameters(Qa, na, W, S, dA)
     @test mean(na) > 0.01 && mean(na) < 0.07
     @test A0 > 0
     @test n > 0.01 && n < 0.07
+    @test nse(Q[1, :], Qa) > 0.9
 end
