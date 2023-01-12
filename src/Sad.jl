@@ -314,10 +314,10 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     Sa = mean(Se, dims=2)[:, 1]
     Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens, Hr, false)
     # diagnose discharge and roughness coefficient
-    Qa = [clamp(q, minimum(Qp), maximum(Qp)) for q in Qa]
+    Qa = convert(Vector{FloatM}, [clamp(q, minimum(Qp), maximum(Qp)) for q in Qa])
     nam = [n for n in na if !ismissing(n) & !isnan(n)]
     nm = length(nam) > 0 ? mean(nam) : mean(ne)
-    na = [!ismissing(n) & isnan(n) ? nm : n for n in na]
+    na = convert(Vector{FloatM}, [!ismissing(n) & isnan(n) ? nm : n for n in na])
     za = zeros(length(x))
     za[1] = mean(zp)
     for i=2:length(x) za[i] = za[i-1] + Sa[i] * (x[i] - x[i-1]) end
