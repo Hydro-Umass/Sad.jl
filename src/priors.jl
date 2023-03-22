@@ -138,7 +138,9 @@ function priors(ncfile::String, hmin::Float64, id::Int)
         q_m = exp(g["logQc_hat"][i])
         q_u = exp(g["upperbound_logQc"][i])
         q_l = exp(g["lowerbound_logQc"][i])
-        Qp = Truncated(LogNormal(log(q_m)-2.0^2/2, 2.0), q_l, q_u)
+        qm = log(q_m)-2.0^2/2
+        qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
+        Qp = Truncated(LogNormal(qm, 2.0), q_l, q_u)
         zp = Uniform(hmin-20, hmin)
         Qp, np, rp, zp
     end

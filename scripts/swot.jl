@@ -47,6 +47,9 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         Hr = convert(Vector{Sad.FloatM}, reaches["wse"][:])
         Wr = convert(Vector{Sad.FloatM}, reaches["width"][:])
         Sr = convert(Vector{Sad.FloatM}, reaches["slope2"][:])
+        W[isnan.(H)] .= missing
+        S[isnan.(H)] .= missing
+        H[isnan.(H)] .= missing
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
         i = [dmap[k] for k in nids]
