@@ -228,7 +228,11 @@ Remove cross sections with no valid observations.
 """
 function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM})
     i = [j for j=1:size(H, 1) if !all(ismissing.(H[j, :]))]
-    x[i] .- minimum(x[i]), H[i, :], W[i, :], S[i, :]
+    if isempty(i)
+        x, H, W, S
+    else
+        x[i] .- minimum(x[i]), H[i, :], W[i, :], S[i, :]
+    end
 end
 
 """
