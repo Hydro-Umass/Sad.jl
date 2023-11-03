@@ -158,7 +158,7 @@ Derive distributions for discharge, roughness coefficient, channel shape paramet
 """
 function priors(qwbm::Float64, hmin::Float64, class::River)
     rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
-    Qp = Truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
+    Qp = truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
     np = Uniform(0.01, 0.07)
     rp = Uniform(rbnds[Int(class)]...)
     zp = Uniform(hmin-20, hmin)
