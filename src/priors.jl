@@ -129,18 +129,18 @@ function priors(ncfile::String, hmin::Float64, id::Int)
         g = NCDatasets.group(NCDatasets.group(f, "gbpriors"), "reach")
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
-        np = Uniform(n_l, n_u)
         r_m = exp(g["logr_hat"][i])
         r_s = exp(g["logr_sd"][i])
         r_l = exp(g["lowerbound_logr"][i])
         r_u = exp(g["upperbound_logr"][i])
-        rp = Truncated(Normal(r_m, r_s), r_l, r_u)
         q_m = exp(g["logQc_hat"][i])
         q_u = exp(g["upperbound_logQc"][i])
         q_l = exp(g["lowerbound_logQc"][i])
         qm = log(q_m)-2.0^2/2
         qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
-        Qp = Truncated(LogNormal(qm, 2.0), q_l, q_u)
+        np = try Uniform(n_l, n_u) catch Uniform(0.01, 0.07) end
+        rp = try Truncated(Normal(r_m, r_s), r_l, r_u) catch Uniform(1.0, 10.0) end
+        Qp = try Truncated(LogNormal(qm, 2.0), q_l, q_u) catch Truncated(LogNormal(qm, 2.0), 0.1*q_m, 10*q_m) end
         zp = Uniform(hmin-20, hmin)
         Qp, np, rp, zp
     end
@@ -158,7 +158,7 @@ Derive distributions for discharge, roughness coefficient, channel shape paramet
 """
 function priors(qwbm::Float64, hmin::Float64, class::River)
     rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
-    Qp = truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
+    Qp = Truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
     np = Uniform(0.01, 0.07)
     rp = Uniform(rbnds[Int(class)]...)
     zp = Uniform(hmin-20, hmin)
