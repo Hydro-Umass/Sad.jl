@@ -227,7 +227,7 @@ Remove cross sections with no valid observations.
 
 """
 function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM})
-    i = [j for j=1:size(H, 1) if !all(ismissing.(H[j, :]))]
+    i = [j for j=1:size(H, 1) if (!all(ismissing.(H[j, :])) & !all(ismissing.(W[j, :])))]
     if isempty(i)
         x, H, W, S
     else
