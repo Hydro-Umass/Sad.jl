@@ -81,7 +81,6 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     he = gvf_ensemble!(mean(skipmissing(H[1, :])), S0, x, hbf, wbf, Qe, ne, re, ze)
     h = ze .+ he .* ((re .+ 1) ./ re)'
     i = findall(he[1, :] .> 0)
-    # obs = mean(H, dims=1)[1, :]
     obs = mean.(skipmissing.(eachcol(H)))
     Fobs = kde(obs[.!isnan.(obs)])
     mod = mean(h[:, i], dims=1)[1, :]
