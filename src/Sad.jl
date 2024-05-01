@@ -49,8 +49,9 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
             # find valid flow depths simulated
             i = findall(he[1, :] .> 0)
             if length(i) < min_ensemble_size
-                Sf = [S[j, t] > 0 ? S[j, t] : minimum(S[:, t][S[:, t] .> 0]) for j=1:length(x)]
-                he = [(Qe[e] .* ne[e]) ./ (W[j, t] .* Sf[j].^0.5).^(3/5) for j=1:length(x), e=1:nens]
+                Sf = [!ismissing(S[j, t]) & (S[j, t] > 0) ? S[j, t] : minimum(S[:, t][.!ismissing.(S[:, t]) .& (S[:, t] .> 0)]) for j=1:length(x)]
+                Wmean = mean.(skipmissing.(eachrow(W)))
+                he = [(Qe[e] .* ne[e]) ./ ((ismissing(W[j, t]) ? Wmean[j] : W[j, t]) .* Sf[j].^0.5).^(3/5) for j=1:length(x), e=1:nens]
             end
             i = findall(he[1, :] .> 0)
             h = ze .+ he .* ((re .+ 1) ./ re)'
