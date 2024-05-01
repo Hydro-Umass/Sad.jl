@@ -215,7 +215,8 @@ Estimate flow parameters (roughness coefficient and baseflow cross-sectional are
 
 """
 function flow_parameters(Qa::Vector{FloatM}, na::Vector{FloatM}, Wm::Vector{FloatM}, Sm::Vector{FloatM}, dA::Vector{FloatM})
-    i = findall(.!ismissing.(Sm) .& (Sm .> 0))
+    i = findall(.!ismissing.(Sm) .& (Sm .> 0) .& .!isnan.(Sm))
+    dA[ismissing.(dA)] .= 0.0
     A0 = (na[i] .* Qa[i]).^(3/5) .* Wm[i].^(2/5) .* Sm[i].^(-3/10) .- dA[i]
     A0 = mean(skipmissing(A0))
     n = mean(skipmissing(na))
