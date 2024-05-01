@@ -114,7 +114,7 @@ Estimate channel bed slope and thalweg (elevation) by assimilating SWOT water su
 - `ϵₒ`: observation error (default value of 10 cm)
 
 """
-function bathymetry!(ze::Matrix{Float64}, S::Matrix{FloatM}, S0::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, ϵₒ::Float64=0.1)
+function bathymetry!(ze::Matrix{Float64}, S::Matrix{FloatM}, S0::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, H::Vector{Float64}, Hmin::Float64,  ϵₒ::Float64=0.1)
     seed!(1)
     nens = size(ze, 2)
     Se = repeat(S', outer=((nens ÷ size(H, 2)) + 1))'[:, 1:nens]
@@ -139,6 +139,15 @@ function bathymetry!(ze::Matrix{Float64}, S::Matrix{FloatM}, S0::Vector{Float64}
         S = [S[1, :]'; S]
         for k=1:length(x) S[k, S[k, :] .< 0] .= minimum(Se[k, :]) end
         Se = S
+    end
+    # check if estimated bathymetry is less than upper limit (i.e., minimum observed WSE)
+    for i=1:size(ze, 2)
+        if ze[1, i] > Hmin
+            ze[1, i] = Hmin - 0.1
+            for j=2:size(ze, 1)
+                ze[j, i] = ze[j-1] + Se[j] * (x[j] - x[j-1])
+            end
+        end
     end
     Se
 end
@@ -314,8 +323,9 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     S0 = calc_bed_slope(x, S)
     Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
-    Se = bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
-    zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(skipmissing(H[1, :])))
+    Hmin = minimum(skipmissing(H[1, :]))
+    Se = bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))), Hmin)
+    zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, Hmin)
     Sa = mean(Se, dims=2)[:, 1]
     Qa, Qu, na = assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, nens, Hr, false)
     # diagnose discharge and roughness coefficient
