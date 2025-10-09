@@ -40,7 +40,7 @@ Qe, ne, re, ze = Sad.prior_ensemble(x, Qp, np, rp, zp, nens)
     @test all([mean(v) isa Real for v in [Qe, ne, re, ze]])
 end
 
-Se = Sad.bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
+Se = Sad.bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))), minimum(H[1, :]))
 zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
 Sa = mean(Se, dims=2)[:, 1]
 
