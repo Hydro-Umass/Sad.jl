@@ -43,7 +43,7 @@ function assimilate(H, W, S, x, wbf, hbf, S0::Vector{Float64}, Qp::Distribution,
     na = zeros(FloatM, nt)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     for t in 1:nt
-        if any(.!ismissing.(H[:, t])) # check if there are any valid observations
+        if sum(.!ismissing.(H[:, t])) > 1 # ensure that there are at least two nodes with valid observations
             hbc = ismissing(H[1, t]) ? interpolate_hbc(x, H[:, t], S0) : H[1, t]
             he = gvf_ensemble!(hbc, S0, x, hbf, wbf, Qe, ne, re, ze)
             # find valid flow depths simulated
