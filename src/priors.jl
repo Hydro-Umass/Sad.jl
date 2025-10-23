@@ -132,9 +132,11 @@ function priors(ncfile::String, hmin::Float64, id::Int)
         r_s = exp(g["logr_sd"][i])
         r_l = exp(g["lowerbound_logr"][i])
         r_u = exp(g["upperbound_logr"][i])
-        q_m = exp(g["logQc_hat"][i])
-        q_u = exp(g["upperbound_logQc"][i])
-        q_l = exp(g["lowerbound_logQc"][i])
+        # FIXME: change to monthly Q from ML priors
+        m = NCDatasets.group(f, "model")
+        q_m = m["mean_q"][i]
+        q_u = m["max_q"][i]
+        q_l = m["min_q"][i]
         if ismissing(q_m)
             Qp = missing
         else
