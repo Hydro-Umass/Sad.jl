@@ -87,10 +87,16 @@ function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution
     Fmod = kde(mod)
     L = 1.0
     accepted = [rand(Uniform(0, L)) * pdf(Fmod, s) <= pdf(Fobs, s) for s in mod]
+    # catch case when all samples are rejected
+    if sum(accepted) < 1
+        accepted = ones(Int64, length(i))
+    end
     Qm = mean(Qe[i[accepted]])
-    Qcv = std(Qe[i[accepted]]) / mean(Qe[i[accepted]])
+    Qcv = sum(accepted) > 1 ? std(Qe[i[accepted]]) / mean(Qe[i[accepted]]) : 0.5
     Qpₘ = truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
-    zpₘ = truncated(Normal(mean(ze[1, i[accepted]]), std(ze[1, i[accepted]])), -Inf, minimum(skipmissing(H[1, :])))
+    zm = mean(ze[1, i[accepted]])
+    zs = sum(accepted) > 1 ? std(ze[1, i[accepted]]) : 0.1 * zm
+    zpₘ = truncated(Normal(zm, zs), -Inf, minimum(skipmissing(H[1, :])))
     re = lhs_ensemble(nens, rp)[1]
     Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
     hm = zeros(nens)
