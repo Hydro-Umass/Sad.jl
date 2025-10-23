@@ -50,6 +50,8 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         W[.!ismissing.(H) .&& isnan.(H)] .= missing
         S[.!ismissing.(H) .&& isnan.(H)] .= missing
         H[.!ismissing.(H) .&& isnan.(H)] .= missing
+        # ensure that there are no negative widths
+        W[.!ismissing.(W) .&& W .< 0] .= missing
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
         i = [dmap[k] for k in nids]
@@ -129,10 +131,11 @@ function main()
     n = missing
     Qa = Array{Missing}(missing, 1, size(W,1))
     Qu = Array{Missing}(missing, 1, size(W,1))
-    if all(ismissing, H) || all(ismissing, W) || all(ismissing, S)
+    if all(ismissing, H) || all(ismissing, W) || all(ismissing, S) || size(H, 1) <= 1
         println("$(reachid): INVALID")
         write_output(reachid, 0, outdir, A0, n, Qa, Qu)
     else
+        H, S = Sad.interpolate_negative_slopes(x, H)
         Hmin = minimum(skipmissing(H[1, :]))
         Qp, np, rp, zp = Sad.priors(sosfile, Hmin, reachid)
         if ismissing(Qp)
