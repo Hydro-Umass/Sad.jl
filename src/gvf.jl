@@ -52,7 +52,7 @@ Calculate a water surface profile by solving the Gradually-Varied-Flow equation.
 function gvf(Q::Float64, ybc::Float64, S0::Vector{Float64}, n::Float64,
              x::Vector{Float64}, wbf::Vector{Float64}, ybf::Vector{Float64}, r::Vector{Float64})
     c = [Dingman(wbf[i], ybf[i], ybc, r[i], S0[i], n) for i in 1:length(x)]
-    prob = DiscreteProblem(dydx, ybc, (x[1], x[end]), (Q, c, x[end]))
+    prob = ODEProblem(dydx, ybc, (x[1], x[end]), (Q, c, x[end]))
     h = try
         sol = solve(prob, Tsit5(), abstol=1e-2, saveat=x)
         sol.u
