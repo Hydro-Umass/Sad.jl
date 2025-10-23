@@ -12,6 +12,7 @@ include("crosssections.jl")
 include("gvf.jl")
 include("priors.jl")
 include("kalman.jl")
+include("outliers.jl")
 
 """
     assimilate(H, W, S, x, wbf, hbf, S0, Qp, np, rp, zp, nens, constrain)
@@ -247,6 +248,31 @@ function drop_unobserved(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM
 end
 
 """
+        interpolate_negative_slopes(x, H)
+
+Adjust river elevation profile to ensure physically realistic water surface (monotonically decreasing from upstream to downstream) by enforcing positive slopes.
+
+# Arguments
+- `x`: channel chainage
+- `H`: time series of water surface profiles
+- `min_slope`: minimum slope to use between cross sections
+
+"""
+function interpolate_negative_slopes(x::Vector{Float64}, H::Matrix{FloatM}; min_slope::Float64=0.0001)
+    Hs = copy(H)
+    S = diff(H, dims=1) ./ diff(x)
+    S = vcat(S, S[end, :]')
+    Ss = copy(S)
+    for t=1:size(H, 2)
+        if any(skipmissing(S[:, t]) .< 0)
+            Hs[:, t] = min_slope_regression(x, H[:, t], min_slope)
+        end
+        Ss[:, t] = calc_slope(x, Hs[:, t], min_slope)
+    end
+    Hs, Ss
+end
+
+"""
     calc_bed_slope(x, S)
 
 Estimate initial channel bed slope.
@@ -322,7 +348,7 @@ function estimate(x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::M
     wbf = maximum.(skipmissing.(eachrow(W)))
     hbf = maximum.(skipmissing.(eachrow(H)))
     S0 = calc_bed_slope(x, S)
-    Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, S0, wbf, hbf, nens, nsamples)
+    Qp, np, rp, zp = rejection_sampling(Qp, np, rp, zp, x, H, W, S, S0, wbf, hbf, nens, nsamples)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nens)
     Hmin = minimum(skipmissing(H[1, :]))
     Se = bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))), Hmin)
