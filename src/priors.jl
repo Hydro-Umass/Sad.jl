@@ -68,6 +68,8 @@ Use rejection sampling to select a subset of the prior ensemble.
 - `zp`: prior distribution for downstream bed elevation
 - `x`: channel chainage
 - `H`: time series of observed water surface elevation profiles
+- `W`: times series of observed width profiles
+- `S`: time series of observed slope profiles
 - `S0`: prior estimate of channel bed slope
 - `hbc`: mean downstream flow depth used as boundary condition
 - `wbf`: bankfull width
@@ -76,11 +78,17 @@ Use rejection sampling to select a subset of the prior ensemble.
 - `nsamples`: number of samples
 
 """
-function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{FloatM}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int)
+function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int; min_ensemble_size::Int=5)
     Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nsamples)
     he = gvf_ensemble!(mean(skipmissing(H[1, :])), S0, x, hbf, wbf, Qe, ne, re, ze)
-    h = ze .+ he .* ((re .+ 1) ./ re)'
     i = findall(he[1, :] .> 0)
+    if length(i) < min_ensemble_size
+        Sf = mean.(skipmissing.(eachrow(S)))
+        Wmean = mean.(skipmissing.(eachrow(W)))
+        he = [(Qe[e] .* ne[e]) ./ (Wmean[j] * Sf[j]^0.5)^(3/5) for j=1:length(x), e=1:nsamples]
+        i = findall(he[1, :] .> 0)
+    end
+    h = ze .+ he .* ((re .+ 1) ./ re)'
     obs = mean.(skipmissing.(eachcol(H)))
     Fobs = kde(obs[.!isnan.(obs)])
     mod = mean(h[:, i], dims=1)[1, :]
