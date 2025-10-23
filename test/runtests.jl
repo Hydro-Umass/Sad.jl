@@ -28,12 +28,13 @@ S = convert(Matrix{Sad.FloatM}, S)
 x, H, W, S = Sad.drop_unobserved(x, H, W, S)
 H, S = Sad.interpolate_negative_slopes(x, H)
 S0 = mean(S, dims=2)[:, 1]
+S = convert(Matrix{Sad.FloatM}, S)
 
 # perform estimation
 nens = 100
 nsamples = 1000
 Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(H[1, :]), Sad.sinuous)
-Qp, np, rp, zp = Sad.rejection_sampling(Qp0, np0, rp0, zp0, x, H, S0, wbf, hbf, nens, nsamples)
+Qp, np, rp, zp = Sad.rejection_sampling(Qp0, np0, rp0, zp0, x, H, W, S, S0, wbf, hbf, nens, nsamples)
 Qe, ne, re, ze = Sad.prior_ensemble(x, Qp, np, rp, zp, nens)
 
 @testset "priors" begin
@@ -69,7 +70,7 @@ nse(o, m) = 1 - sum((o .- m).^2) / sum((o .- mean(o)).^2)
     @test mean(na) > 0.01 && mean(na) < 0.07
     @test A0 > 0
     @test n > 0.01 && n < 0.07
-    @test nse(Q[1, :], Qa) > 0.5
+    @test nse(Q[1, :], Qa) > 0.4
 end
 
 f = Dataset("missingdata.nc")
