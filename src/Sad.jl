@@ -264,9 +264,7 @@ function interpolate_negative_slopes(x::Vector{Float64}, H::Matrix{FloatM}; min_
     S = vcat(S, S[end, :]')
     Ss = copy(S)
     for t=1:size(H, 2)
-        if any(skipmissing(S[:, t]) .< 0)
-            Hs[:, t] = min_slope_regression(x, H[:, t], min_slope)
-        end
+        Hs[:, t] = monotonic_interpolate_min_slope(x, H[:, t], x; min_slope=min_slope)
         Ss[:, t] = calc_slope(x, Hs[:, t], min_slope)
     end
     Hs, Ss
