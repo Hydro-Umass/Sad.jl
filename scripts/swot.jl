@@ -6,6 +6,7 @@ using Distributions
 using LinearAlgebra
 using NCDatasets
 using JSON
+using Dates
 
 const FILL = -999999999999
 
@@ -50,12 +51,13 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         W[.!ismissing.(H) .&& isnan.(H)] .= missing
         S[.!ismissing.(H) .&& isnan.(H)] .= missing
         H[.!ismissing.(H) .&& isnan.(H)] .= missing
+        t = reaches["time"][:]
         # ensure that there are no negative widths
         W[.!ismissing.(W) .&& W .< 0] .= missing
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
         i = [dmap[k] for k in nids]
-        H[i, :], W[i, :], S[i, :], dA, Hr, Wr, Sr
+        H[i, :], W[i, :], S[i, :], dA, Hr, Wr, Sr, t
     end
 end
 
@@ -93,7 +95,7 @@ end
 Write SAD output to NetCDF.
 
 """
-function write_output(reachid, valid, outdir, A0, n, Qa, Qu)
+function write_output(reachid, valid, outdir, A0, n, Qa, Qu, obst)
     outfile = joinpath(outdir, "$(reachid)_sad.nc")
     out = Dataset(outfile, "c")
     out.attrib["valid"] = valid   # FIXME Determine what is considered valid in the context of a SAD run
@@ -108,6 +110,13 @@ function write_output(reachid, valid, outdir, A0, n, Qa, Qu)
     Qav[:] = replace!(Qa, NaN=>FILL)
     Quv = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
     Quv[:] = Qu
+    obstv = defVar(out, "time", obst, ("time",), attrib = Dict(
+        "units" => "seconds since 2000-01-01 00:00:00.000"), fillvalue = FILL)
+    obsts = Vector{Union{Missing, String}}(undef, length(obst))
+    obsts[.!ismissing.(obst)] = Dates.format.(skipmissing(obst), dateformat"yyyy-m-ddTHH:MM:SS")
+    obsts[ismissing.(obst)] .= missing
+    obstsv = defVar(out, "time_str", String, ("time",), fillvalue="n")
+    obstsv[:] = obsts
     close(out)
 end
 
@@ -125,7 +134,7 @@ function main()
     reachid, swotfile, sosfile, swordfile = get_reach_files(indir, reachfile)
 
     nids, x = river_info(reachid, swordfile)
-    H, W, S, dA, Hr, Wr, Sr = read_swot_obs(swotfile, nids)
+    H, W, S, dA, Hr, Wr, Sr, obst = read_swot_obs(swotfile, nids)
     x, H, W, S = Sad.drop_unobserved(x, H, W, S)
     A0 = missing
     n = missing
@@ -133,24 +142,24 @@ function main()
     Qu = Array{Missing}(missing, 1, size(W,1))
     if all(ismissing, H) || all(ismissing, W) || all(ismissing, S) || size(H, 1) <= 1
         println("$(reachid): INVALID")
-        write_output(reachid, 0, outdir, A0, n, Qa, Qu)
+        write_output(reachid, 0, outdir, A0, n, Qa, Qu, obst)
     else
         H, S = Sad.interpolate_negative_slopes(x, H)
         Hmin = minimum(skipmissing(H[1, :]))
         Qp, np, rp, zp = Sad.priors(sosfile, Hmin, reachid)
         if ismissing(Qp)
             println("$(reachid): INVALID, missing mean discharge")
-            write_output(reachid, 0, outdir, A0, n, Qa, Qu)
+            write_output(reachid, 0, outdir, A0, n, Qa, Qu, obst)
         else
             try
                 nens = 100 # default ensemble size
                 nsamples = 1000 # default sampling size
                 Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples, Hr, Wr, Sr)
                 println("$(reachid): VALID")
-                write_output(reachid, 1, outdir, A0, n, Qa, Qu)
+                write_output(reachid, 1, outdir, A0, n, Qa, Qu, obst)
             catch
                 println("$(reachid): INVALID")
-                write_output(reachid, 0, outdir, A0, n, Qa, Qu)
+                write_output(reachid, 0, outdir, A0, n, Qa, Qu, obst)
             end
         end
     end
