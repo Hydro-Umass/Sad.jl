@@ -1,189 +1,132 @@
 using Distributions
 using NCDatasets
-using Random: seed!
-using KernelDensity: kde
-using BlackBoxOptim.Utils: latin_hypercube_sampling
 
 """
-    get_samples(p, samples)
-
-Get quantiles from `p` according to weights provided by
-Latin Hypercube Sampling `samples`.
+River planform classification used to set uninformative prior bounds on
+the Dingman shape exponent `r`.
+"""
+@enum River braided=1 sinuous=2 more_sinuous=3 straight=4
 
 """
-function get_samples(p, samples)
-    out = try
-        quantile.(p, samples)
-    catch
-        [quantile(p, s) for s in samples]
-    end
-    out
+    SWOTPriors
+
+Prior distributions for all inferred parameters in the SAD algorithm.
+
+# Fields
+- `Qp`: discharge prior
+- `np`: Manning roughness coefficient prior
+- `rp`: Dingman shape exponent prior
+- `zp`: downstream bed elevation prior
+- `ap`: slope correction factor prior (centered on 1)
+"""
+struct SWOTPriors
+    Qp :: Distribution
+    np :: Distribution
+    rp :: Distribution
+    zp :: Distribution
+    ap :: Distribution
 end
 
 """
-    lhs_ensemble(nens, args...)
+    priors(sosfile, hmin, reachid)
 
-Generate an ensemble of size `nens` using Latin Hypercube Sampling of the
-list of distributions or collections provided as `args`.
-
-"""
-function lhs_ensemble(nens, args...)
-    seed!(1)
-    nvars = length(args)
-    usamples = latin_hypercube_sampling([0. for _ in 1:nvars], [1. for _ in 1:nvars], nens)
-    [get_samples(args[i], usamples[i, :]) for i in 1:nvars]
-end
-
-"""
-    prior_ensemble(x, Qp, np, rp, zp, nens)
-
-Generate a prior ensemble of discharge, roughness coefficient, channel shape parameter,
-and downstream bed elevation from provided distributions or sample data.
+Derive prior distributions from the SoS (SWORD of Science) database.
 
 # Arguments
-- `x`: distances between cross sections
-- `Qp`: discharge prior distribution
-- `np`: roughness coefficient distribution
-- `rp`: channel shape parameter distribution
-- `zp`: downstream bathymetry distribution
-- `nens`: ensemble size
+- `sosfile`: path to SoS NetCDF file
+- `hmin`:    minimum observed downstream WSE (upper bound for z0 prior)
+- `reachid`: SWORD reach ID
 
+Returns a `SWOTPriors` or `missing` if discharge prior cannot be constructed.
 """
-function prior_ensemble(x::Vector{Float64}, Qp::Distribution, np::Distribution,
-                        rp::Distribution, zp::Distribution, nens::Int)
-    ze = zeros(length(x), nens)
-    Qe, ne, re, ze[1, :] = lhs_ensemble(nens, Qp, np, rp, zp)
-    Qe, ne, re, ze
-end
-
-"""
-    rejection_sampling(Qp, np, rp, zp, x, H, S0, hbc, wbf, hbf, nens, nsamples)
-
-Use rejection sampling to select a subset of the prior ensemble.
-
-# Arguments
-- `Qp`: prior discharge distribution
-- `np`: prior roughness coefficient distribution
-- `rp`: prior channel shape parameter distribution
-- `zp`: prior distribution for downstream bed elevation
-- `x`: channel chainage
-- `H`: time series of observed water surface elevation profiles
-- `W`: times series of observed width profiles
-- `S`: time series of observed slope profiles
-- `S0`: prior estimate of channel bed slope
-- `hbc`: mean downstream flow depth used as boundary condition
-- `wbf`: bankfull width
-- `hbf`: bankfull water surface elevation
-- `nens`: ensemble size
-- `nsamples`: number of samples
-
-"""
-function rejection_sampling(Qp::Distribution, np::Distribution, rp::Distribution, zp::Distribution, x::Vector{Float64}, H::Matrix{FloatM}, W::Matrix{FloatM}, S::Matrix{FloatM}, S0::Vector{Float64}, wbf::Vector{Float64}, hbf::Vector{Float64}, nens::Int, nsamples::Int; min_ensemble_size::Int=5)
-    Qe, ne, re, ze = prior_ensemble(x, Qp, np, rp, zp, nsamples)
-    he = gvf_ensemble!(mean(skipmissing(H[1, :])), S0, x, hbf, wbf, Qe, ne, re, ze)
-    i = findall(he[1, :] .> 0)
-    if length(i) < min_ensemble_size
-        Sf = mean.(skipmissing.(eachrow(S)))
-        Wmean = mean.(skipmissing.(eachrow(W)))
-        he = [(Qe[e] .* ne[e]) ./ (Wmean[j] * Sf[j]^0.5)^(3/5) for j=1:length(x), e=1:nsamples]
-        i = findall(he[1, :] .> 0)
-    end
-    h = ze .+ he .* ((re .+ 1) ./ re)'
-    obs = mean.(skipmissing.(eachcol(H)))
-    Fobs = kde(obs[.!isnan.(obs)])
-    mod = mean(h[:, i], dims=1)[1, :]
-    Fmod = kde(mod)
-    L = 1.0
-    accepted = [rand(Uniform(0, L)) * pdf(Fmod, s) <= pdf(Fobs, s) for s in mod]
-    # catch case when all samples are rejected
-    if sum(accepted) < 1
-        accepted = ones(Int64, length(i))
-    end
-    Qm = mean(Qe[i[accepted]])
-    Qcv = sum(accepted) > 1 ? std(Qe[i[accepted]]) / mean(Qe[i[accepted]]) : 0.5
-    Qpₘ = truncated(LogNormal(log(Qm) - Qcv^2/2, Qcv), minimum(Qp), maximum(Qp))
-    zm = mean(ze[1, i[accepted]])
-    zs = sum(accepted) > 1 ? std(ze[1, i[accepted]]) : 0.1 * zm
-    zpₘ = truncated(Normal(zm, zs), -Inf, minimum(skipmissing(H[1, :])))
-    re = lhs_ensemble(nens, rp)[1]
-    Qe, ne, _, ze = prior_ensemble(x, Qpₘ, np, rp, zpₘ, size(H, 2))
-    hm = zeros(nens)
-    for e=1:nens
-        he = zeros(length(x), size(H, 2))
-        for t=1:size(H, 2)
-            hbc = ismissing(H[1, t]) ? mean(skipmissing(H[1, :])) : H[1, t]
-            he[:, t] = gvf_ensemble!(hbc, S0, x, hbf, wbf, [Qe[t]], [ne[t]], [re[e]], ze)
-            h = ze .+ he .* ((re[e] .+ 1) ./ re[e])'
-            i = findall(he[1, :] .> 0)
-            hm[e] = mean(h[:, i])
-        end
-    end
-    reₘ = re[argmin(abs.(mean(mean.(skipmissing.(eachrow(H)))) .- hm))]
-    # assume a CV of 0.1 for the channel shape parameter
-    rpₘ = truncated(Normal(reₘ, 0.1*reₘ), 0.5, 20.0)
-    Qpₘ, np, rpₘ, zpₘ
-end
-
-"""
-    priors(ncfile, hmin, id)
-
-Derive prior distributions for discharge, roughness coefficient, channel shape parameter, and bed elevation by reading the [SWORD](http://gaia.geosci.unc.edu/SWORD/) a-priori database.
-
-# Arguments
-- `ncfile`: NetCDF file of SWORD database
-- `hmin`: minimum observed downstream water surface elevation
-- `id`: Reach ID in SWORD database
-
-"""
-function priors(ncfile::String, hmin::Float64, id::Int)
-    NCDataset(ncfile) do f
+function priors(sosfile::String, hmin::Float64, reachid::Int)
+    NCDataset(sosfile) do f
         gr = NCDatasets.group(f, "reaches")
-        i = findall(gr["reach_id"][:] .== id)[1]
-        g = NCDatasets.group(NCDatasets.group(f, "gbpriors"), "reach")
+        i  = findall(gr["reach_id"][:] .== reachid)[1]
+        # roughness
+        g   = NCDatasets.group(NCDatasets.group(f, "gbpriors"), "reach")
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
+        np  = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.10) end
+        # channel shape parameter
         r_m = exp(g["logr_hat"][i])
         r_s = exp(g["logr_sd"][i])
         r_l = exp(g["lowerbound_logr"][i])
         r_u = exp(g["upperbound_logr"][i])
-        # FIXME: change to monthly Q from ML priors
-        m = NCDatasets.group(f, "model")
+        rp  = try truncated(Normal(r_m, r_s), r_l, r_u) catch; Uniform(1.0, 10.0) end
+        # discharge
+        m   = NCDatasets.group(f, "model")
         q_m = m["mean_q"][i]
         q_u = m["max_q"][i]
         q_l = m["min_q"][i]
         if ismissing(q_m)
-            Qp = missing
-        else
-            qm = log(q_m)-2.0^2/2
-            qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
-            Qp = try
-                Truncated(LogNormal(qm, 2.0), q_l, q_u)
-            catch
-                Truncated(LogNormal(qm, 2.0), 0.1*q_m, 10*q_m)
-            end
+            return missing
         end
-        np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
-        rp = try Truncated(Normal(r_m, r_s), r_l, r_u) catch; Uniform(1.0, 10.0) end
-        zp = Uniform(hmin-20, hmin)
-        Qp, np, rp, zp
+        qm = log(q_m) - 2.0^2 / 2
+        qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
+        # Upper bound widened to 20x mean Q to capture extreme flood events
+        # beyond the 10x bound which excludes truth at high-flow reaches
+        Qp = try
+            truncated(LogNormal(qm, 2.0), q_l, q_u)
+        catch
+            truncated(LogNormal(qm, 2.0), 0.1 * q_m, 20 * q_m)
+        end
+        # bed elevation
+        z0_est = hmin - 5.0
+        zp = Uniform(z0_est - 3.0, z0_est + 3.0)
+        # slope correction
+        ap = LogNormal(0.0, 0.2)
+        SWOTPriors(Qp, np, rp, zp, ap)
     end
 end
 
 """
-    priors(qwbm, hmin)
+    priors(qwbm, hmin, class; reach)
 
-Derive distributions for discharge, roughness coefficient, channel shape parameter, and bed elevation using uninformative priors.
+Construct uninformative priors when SoS data are unavailable.
 
 # Arguments
-- `qwbm`: mean discharge
-- `hmin`: minimum downstream water surface elevation
+- `qwbm`:  mean discharge estimate [m³/s]
+- `hmin`:  minimum observed downstream WSE [m]
+- `class`: river planform class (`River` enum: braided=1, sinuous=2,
+           more_sinuous=3, straight=4) — controls r prior bounds
+
+# Keyword arguments
+- `reach`: optional SWOTReach — if provided, z0 is estimated from the
+           observed WSE profile and bed slope rather than hmin alone
+"""
+function priors(qwbm::Float64, hmin::Float64, class::River;
+                reach=nothing)
+    rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
+    # Upper bound widened to 20x mean Q to capture extreme flood events
+    # (10x was excluding truth at high-flow reaches)
+    Qp = truncated(LogNormal(log(qwbm) - 2.0^2 / 2, 2.0), 0.1 * qwbm, 20 * qwbm)
+    n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
+    np = Uniform(n_lo, 0.07)
+    rp = Uniform(rbnds[Int(class)]...)
+    zp = z0_prior(qwbm, hmin, reach)
+    ap = LogNormal(0.0, 0.2)
+    SWOTPriors(Qp, np, rp, zp, ap)
+end
 
 """
-function priors(qwbm::Float64, hmin::Float64, class::River)
-    rbnds = [(0.5, 1), (1, 5), (5 ,10), (10, 20)]
-    Qp = truncated(LogNormal(log(qwbm)-2.0^2/2, 2.0), 0.1*qwbm, 10*qwbm)
-    np = Uniform(0.01, 0.07)
-    rp = Uniform(rbnds[Int(class)]...)
-    zp = Uniform(hmin-20, hmin)
-    Qp, np, rp, zp
+    z0_prior(qwbm, hmin, reach) -> Uniform
+
+Estimate the downstream bed elevation prior. If reach is provided, uses
+the minimum observed WSE minus an estimated depth from Manning scaling.
+Otherwise falls back to a fixed depth estimate based on qwbm.
+"""
+function z0_prior(qwbm::Float64, hmin::Float64, reach)
+    if !isnothing(reach)
+        S_med = reach.S0(reach.x[end] / 2)
+        W_med = reach.wbf(reach.x[end] / 2)
+        n_est = qwbm > 500.0 ? 0.035 : 0.030
+        S_use = max(S_med, 1e-5)
+        depth_est = (n_est * qwbm / (W_med * sqrt(S_use)))^0.6
+        depth_est = clamp(depth_est, 2.0, 20.0)
+    else
+        depth_est = qwbm > 500.0 ? 7.0 : (qwbm > 100.0 ? 5.0 : 3.0)
+    end
+    z0_est = hmin - depth_est
+    return Uniform(z0_est - 3.0, z0_est + 3.0)
 end

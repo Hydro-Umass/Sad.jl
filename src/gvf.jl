@@ -1,122 +1,108 @@
 using DifferentialEquations
+using DataInterpolations
+
+# numerical regularization term for the GVF denominator (1 - Fr² + ε)
+# prevents numerical instability if the solver gets near critical flow.
+# at the reach scales of SWOT (large, low-gradient rivers) Fr << 1,
+# so this constant has no physical effect on results
+const gvf_ε = 1e-6
 
 """
-    froude(Q::Float64, xs::CrossSection)
+Flow area for a Dingman cross section.
 
-Calculate the Froude number.
+    A = Wb * (Ym / Yb)^(1/r) * y
+
+where y is the mean flow depth and Ym = (r+1)/r * y is the thalweg depth.
+"""
+function area(y::Real, Wb::Real, Yb::Real, r::Real)
+    Ym = (r + 1) / r * y
+    Wb * (Ym / Yb)^(1 / r) * y
+end
+
+"""
+    gvf_rhs(y, p, x)
+
+ODE right-hand side for the Gradually-Varied-Flow equation, integrated
+upstream (x increases from downstream to upstream boundary).
+
+    dy/dx = -(S0(x)·α - Sf(y)) / (1 - Fr(y)² + ε)
+
+The negative sign arises because we integrate in the upstream direction
+(increasing x): WSE rises upstream so dy/dx > 0 for normal backwater, which
+requires S0 > Sf. The standard downstream-integration form has the opposite
+sign convention.
+
+Manning friction slope:  Sf = (n·Q)² / (A²·y^(4/3))
+Froude number:           Fr = Q / (A·√(g·y))
+
+Both use the wide-channel approximation R ≈ y (mean depth), standard for
+large low-gradient rivers observed by SWOT.
+
+# Parameter tuple `p`
+- `p[1]` Q:       discharge [m³/s]
+- `p[2]` n:       Manning roughness coefficient
+- `p[3]` r:       Dingman shape exponent
+- `p[4]` α:       slope correction factor (S_actual = S0·α)
+- `p[5]` S0_itp:  interpolant for bed slope S0(x)
+- `p[6]` wbf_itp: interpolant for bankfull width Wb(x) [m]
+- `p[7]` hbf_itp: interpolant for bankfull WSE hbf(x) [m]
+- `p[8]` z_itp:   interpolant for cumulative bed elevation reference z(x) [m]
+- `p[9]` z0:      downstream bed elevation [m]
+"""
+function gvf_rhs(y, p, x)
+    Q, n, r, α, S0_itp, wbf_itp, hbf_itp, z_itp, z0 = p
+    y  = max(y, 0.01)
+    Wb = wbf_itp(x)
+    # bed elevation at x: reference profile scaled by α, anchored at z0
+    # z(x) = z0 + z_ref(x)·α,  where z_ref[1] = 0 by construction
+    zx = z0 + z_itp(x) * α
+    Yb = max(hbf_itp(x) - zx, 0.01)
+    S0 = S0_itp(x) * α
+    A  = area(y, Wb, Yb, r)
+    Sf = (n * Q / (A * y^(2/3)))^2
+    Fr = Q / (A * sqrt(9.806 * y))
+    -(S0 - Sf) / (1 - Fr^2 + gvf_ε)
+end
+
+"""
+    gvf_solve(Q, n, r, α, z0, H_bc, reach; saveat) → Vector{Float64} or nothing
+
+Solve the GVF equation for a single parameter set and return predicted
+water surface elevation at the locations specified by `saveat`.
 
 # Arguments
-- `Q`: discharge
-- `xs`: cross section
+- `Q`:      discharge [m³/s]
+- `n`:      Manning roughness coefficient
+- `r`:      Dingman channel shape exponent
+- `α`:      slope correction factor (S_actual = S0·α)
+- `z0`:     downstream bed elevation [m]
+- `H_bc`:   downstream boundary WSE [m]  (use `reach.H[1, t]`)
+- `reach`:  `SWOTReach` from preprocessing stage
+- `saveat`: chainage locations at which to return WSE [m]
+            (default: `reach.obs.x`, aligning output with SWOT observations)
 
+# Returns
+Predicted WSE vector at `saveat` locations, or `nothing` if the solve fails.
 """
-function froude(Q::Float64, xs::CrossSection)
-    g = 9.806
-    Fr = Q / (depth(xs) * width(xs) * sqrt(g * depth(xs)))
-    Fr
-end
-
-"""
-    dydx(y, p, x)
-
-Ordinary differential equation describing the Gradually-Varied-Flow model.
-
-"""
-function dydx(y, p, x)
-    i = trunc(Int, ceil(x / (p[3] / length(p[1]))))
-    i = i > 0 ? i : 1
-    # TODO: Change this dynamically depending on whether the flow is subcritical or supercritical
-    pm = -1 # integrate upstream
-    Q = p[1]
-    xs = p[2][i]
-    xs.Ym = y * (xs.r + 1) / xs.r
-    S0 = xs.S0
-    Sf = xs.n^2 * Q^2 / (width(xs)^2 * depth(xs)^(10/3))
-    Fr = froude(Q, xs)
-    pm * (S0 - Sf) / (1 - Fr^2)
-end
-
-"""
-Calculate a water surface profile by solving the Gradually-Varied-Flow equation.
-
-- `Q`: discharge
-- `ybc`: downstream boundary condition for depth
-- `S0`: bed slope for reach
-- `n`: roughness coefficient
-- `x`: downstream distance for each cross section
-- `wbf`: bankfull width for each cross section
-- `ybf`: bankfull depth for each cross section
-- `r`: channel geometry coefficient for each cross section
-
-"""
-function gvf(Q::Float64, ybc::Float64, S0::Vector{Float64}, n::Float64,
-             x::Vector{Float64}, wbf::Vector{Float64}, ybf::Vector{Float64}, r::Vector{Float64})
-    c = [Dingman(wbf[i], ybf[i], ybc, r[i], S0[i], n) for i in 1:length(x)]
-    prob = ODEProblem(dydx, ybc, (x[1], x[end]), (Q, c, x[end]))
-    h = try
-        sol = solve(prob, Tsit5(), abstol=1e-2, saveat=x)
-        sol.u
+function gvf_solve(Q::Real, n::Real, r::Real, α::Real, z0::Real, H_bc::Real,
+                   reach::SWOTReach;
+                   saveat::Vector{Float64} = collect(reach.obs.x))
+    x       = reach.x
+    S0_itp  = reach.S0
+    wbf_itp = reach.wbf
+    hbf_itp = reach.hbf
+    z_itp   = reach.z
+    y_bc    = max((H_bc - z0) * r / (r + 1), 0.01)
+    p       = (Q, n, r, α, S0_itp, wbf_itp, hbf_itp, z_itp, z0)
+    prob    = ODEProblem(gvf_rhs, y_bc, (x[1], x[end]), p)
+    sol     = try
+        solve(prob, Tsit5(),
+              abstol=1e-3, reltol=1e-3,
+              saveat=saveat, maxiters=10_000)
     catch
-        zeros(length(x)) .- 9999.
-            end
-    h
-end
-
-"""
-    gvf_ensemble!(H, S, x, hbf, wbf, Qe, ne, re, ze)
-
-Generate an ensemble of water height profiles from Gradually-Varied-Flow simulations
-and associated profiles of bed elevation.
-
-# Arguments
-
-- `H`: water surface elevation
-- `S`: bed slope
-- `x`: channel chainage
-- `hbf`: bankfull water surface elevation
-- `wbf`: bankfull width
-- `Qe`: ensemble discharge
-- `ne`: ensemble roughness coefficient
-- `re`: ensemble channel shape parameter
-- `ze`: ensemble bed elevation profiles
-
-"""
-function gvf_ensemble!(hbc::Float64, S, x::Vector{Float64}, hbf::Vector{Float64}, wbf::Vector{Float64}, Qe::Vector{Float64}, ne::Vector{Float64}, re::Vector{Float64}, ze)
-    nens = length(Qe)
-    if ndims(S) > 1
-        Se = S
-    else
-        Se = repeat(S', outer=nens)'
+        return nothing
     end
-    for j in 2:length(x)
-        ze[j, :] = ze[j-1, :] .+ Se[j, :] .* (x[j] - x[j-1]);
-    end
-    ybf = hbf .- ze
-    he = zeros(length(x), nens)
-    for i in 1:nens
-        he[:, i] = gvf(Qe[i], (hbc-ze[1, i])*re[i]/(re[i] + 1), Se[:, i], ne[i], x, wbf, ybf[:, i], [re[i] for _ in 1:length(x)])
-    end
-    he
-end
-
-"""
-    interpolate_hbc(x, H, S)
-
-Interpolate water surface elevation boundary condition by assuming uniform flow, i.e., energy slope is equal to bed slope.
-
-# Arguments
-
-- `x`: channel chainage
-- `H`: water surface elevation profile
-- `S`: bed slope
-
-"""
-function interpolate_hbc(x::Vector{Float64}, H::Vector{FloatM}, S::Vector{Float64})
-    j = minimum(findall(.!ismissing.(H)))
-    h = zeros(j)
-    h[1] = H[j]
-    for k =2:j
-        h[k] = h[k-1] - S[j+2-k] * (x[j+2-k] - x[j+1-k])
-    end
-    h[end]
+    sol.retcode == ReturnCode.Success || return nothing
+    z_saveat = z0 .+ z_itp.(saveat) .* α
+    sol.u .* ((r + 1) / r) .+ z_saveat
 end
