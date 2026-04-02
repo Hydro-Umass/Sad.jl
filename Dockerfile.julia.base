@@ -1,0 +1,24 @@
+# SAD Julia base image — Julia 1.11.6 with all algorithm dependencies
+# precompiled from Project.toml and Manifest.toml.
+# Build and push this once, then derive the algorithm image.
+#
+# Build:  docker build -f Dockerfile.julia.base -t <registry>/sad-julia-base:1.0 .
+# Push:   docker push <registry>/sad-julia-base:1.0
+
+FROM julia:1.12.5
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bzip2 \
+    build-essential \
+    libxml2 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JULIA_DEPOT_PATH=./.julia
+
+# Copy manifest files and instantiate — this resolves and precompiles
+# exact package versions pinned in Manifest.toml
+COPY Project.toml .
+COPY Manifest.toml .
+COPY scripts/create_sys_image.jl .
+ADD src  src/.
+RUN /usr/local/julia/bin/julia create_sys_image.jl -t auto -O3 --startup-file=no --heap-size-hint=6G
