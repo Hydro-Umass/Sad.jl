@@ -293,7 +293,7 @@ end
         S    = convert(Matrix{Sad.FloatM}, [S[1, :]'; S])
 
         @testset "all H missing" begin
-            H_miss = fill(missing, size(H)...)
+            H_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(H)...))
             reach_miss = Sad.preprocess(x, H_miss, W, S)
             # no valid timesteps
             @test sum(reach_miss.valid) == 0
@@ -303,7 +303,7 @@ end
         end
 
         @testset "all W missing" begin
-            W_miss = fill(missing, size(W)...)
+            W_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(W)...))
             reach_miss = Sad.preprocess(x, H, W_miss, S)
             # no valid timesteps since W is missing
             @test sum(reach_miss.valid) == 0
@@ -312,8 +312,8 @@ end
         end
 
         @testset "all H and W missing" begin
-            H_miss = fill(missing, size(H)...)
-            W_miss = fill(missing, size(W)...)
+            H_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(H)...))
+            W_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(W)...))
             reach_miss = Sad.preprocess(x, H_miss, W_miss, S)
             @test sum(reach_miss.valid) == 0
             res = Sad.infer(p, reach_miss; N=10, max_attempts=100)
@@ -321,7 +321,7 @@ end
         end
 
         @testset "H missing for all but one timestep" begin
-            H_one = fill(missing, size(H)...)
+            H_one = convert(Matrix{Sad.FloatM}, fill(missing, size(H)...))
             H_one[:, 1] = H[:, 1]
             reach_one = Sad.preprocess(x, H_one, W, S)
             # only one timestep, not enough for rejection sampling but should not error
