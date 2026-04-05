@@ -230,7 +230,7 @@ end
 @testset "infer" begin
     reach, p, Q_truth = load_test_data()
 
-    res = Sad.infer(p, reach; N=100, max_attempts=5_000)
+    res = Sad.infer(p, reach, N=100)
 
     @testset "output structure" begin
         @test haskey(res, :Q_post)
