@@ -162,9 +162,12 @@ function obs_chainage(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: M
         if length(good_h) < 2 || length(good_w) < 2
             continue
         end
-        itp_w = PCHIPInterpolation(convert(Vector{Float64}, w[good_w]), xobs[good_w]; extrapolation=ExtrapolationType.Linear)
+        _interp(y, x) = length(x) >= 3 ?
+            PCHIPInterpolation(y, x; extrapolation=ExtrapolationType.Linear) :
+            LinearInterpolation(y, x; extrapolation=ExtrapolationType.Linear)
+        itp_w = _interp(convert(Vector{Float64}, w[good_w]), xobs[good_w])
         wout = itp_w.(xobs)
-        itp_h = PCHIPInterpolation(convert(Vector{Float64}, h[good_h]), xobs[good_h]; extrapolation=ExtrapolationType.Linear)
+        itp_h = _interp(convert(Vector{Float64}, h[good_h]), xobs[good_h])
         hout = itp_h.(xobs)
         for k in 2:nn
             dx = xobs[k] - xobs[k-1]
@@ -183,9 +186,14 @@ end
 """
     interpolate_to_chainage(x, y, xnew)
 
-Interpolate a complete vector to new chainage using PCHIP.
+Interpolate a complete vector to new chainage using PCHIP when 3+ points
+are available, falling back to linear interpolation for 2 points.
 """
 function interpolate_to_chainage(x :: Vector{Float64}, y :: Vector{Float64}, xnew :: Vector{Float64})
-    itp = PCHIPInterpolation(y, x; extrapolation=ExtrapolationType.Linear)
+    if length(x) >= 3
+        itp = PCHIPInterpolation(y, x; extrapolation=ExtrapolationType.Linear)
+    else
+        itp = LinearInterpolation(y, x; extrapolation=ExtrapolationType.Linear)
+    end
     return itp.(xnew)
 end
