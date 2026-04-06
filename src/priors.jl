@@ -44,9 +44,16 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         gr = f.group["reaches"]
         i  = findall(gr["reach_id"][:] .== reachid)[1]
         # roughness
-        np = Uniform(0.01, 0.10)
+        g = f.group["gbpriors"].group["reach"]
+        n_l = exp(g["lowerbound_logn"][i])
+        n_u = exp(g["upperbound_logn"][i])
+        np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.10) end
         # channel shape parameter
-        rp = Uniform(0.5, 10.0)
+        r_m = exp(g["logr_hat"][i])
+        r_s = exp(g["logr_sd"][i])
+        r_l = exp(g["lowerbound_logr"][i])
+        r_u = exp(g["upperbound_logr"][i])
+        rp  = try truncated(Normal(r_m, r_s), r_l, r_u) catch; Uniform(0.5, 10.0) end
         # discharge
         m   = NCDatasets.group(f, "model")
         q_m = m["mean_q"][i]
