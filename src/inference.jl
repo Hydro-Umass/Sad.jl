@@ -142,7 +142,18 @@ function infer(priors::SWOTPriors, reach::SWOTReach;
                rho::Float64                 = 1.05,
                completeness_weight::Bool    = true)
 
-    # --- Stage 1: refine reach parameter prior ---
+    # refine reach parameter prior
+    # return early if no valid timesteps
+    if sum(reach.valid) == 0
+        @warn "No valid timesteps — returning empty posterior"
+        return (
+            reach_ensemble = Matrix{Float64}(undef, 4, 0),
+            Q_post         = fill(NaN, reach.nt),
+            A_post         = Vector{Union{Nothing, Matrix{Float64}}}(nothing, reach.nt),
+            rep_ts         = Int[],
+            completeness   = Float64[],
+        )
+    end
     rep_ts         = select_representative_timesteps(reach; n_bins=n_bins)
     reach_ensemble = rejection_sample(priors, reach;
                                       N=N, ε_rel=eps_rel, n_bins=n_bins)
