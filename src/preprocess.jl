@@ -70,6 +70,20 @@ end
 function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Matrix{FloatM}, Sobs :: Matrix{FloatM}; dx :: Float64 = 200.0, min_slope :: Float64 = 1e-5)
     xobs, Hobs, Wobs, Sobs = drop_unobserved!(xobs, Hobs, Wobs, Sobs)
     nobs, nt = size(Hobs)
+    # if all SWOT observations are missing after dropping unobserved nodes,
+    # return an empty reach with no valid timesteps
+    if nobs == 0 || all(ismissing, Hobs) || all(ismissing, Wobs)
+        x_empty  = [0.0]
+        itp_zero = PCHIPInterpolation([0.0], [0.0]; extrapolation=ExtrapolationType.Linear)
+        return SWOTReach(
+            SWOTObs(xobs, Hobs, Wobs),
+            x_empty,
+            zeros(1, nt), zeros(1, nt),
+            falses(nt),
+            itp_zero, itp_zero, itp_zero, itp_zero,
+            0.0, 1, 0, nt,
+        )
+    end
     x = build_chainage(xobs, dx)
     nx = length(x)
     S0obs = estimate_bed_slope(Sobs, min_slope)
@@ -78,13 +92,16 @@ function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Mat
     S0_itp  = PCHIPInterpolation(S0,  x; extrapolation=ExtrapolationType.Linear)
     z = cumsum([0.0; S0[1:end-1] .* diff(x)])
     z_itp   = PCHIPInterpolation(z,   x; extrapolation=ExtrapolationType.Linear)
-    # Use median across timesteps for bankfull width and WSE to avoid
-    # contamination from floodplain inundation at peak flow — using maximum
-    # inflates wbf by 10-20x at some nodes causing GVF to produce near-zero
-    # depths and systematically wrong WSE profiles.
-    wbf = interpolate_to_chainage(xobs, median.(skipmissing.(eachrow(Wobs))), x)
+    # use median across timesteps for bankfull width and WSE as maximum causes
+    # GVF to produce near-zero depths
+    # falls back to zero if no valid SWOT observations were found
+    _row_median(row) = begin
+        vals = collect(skipmissing(row))
+        isempty(vals) ? 0.0 : median(vals)
+    end
+    wbf = interpolate_to_chainage(xobs, _row_median.(eachrow(Wobs)), x)
     wbf_itp = PCHIPInterpolation(wbf, x; extrapolation=ExtrapolationType.Linear)
-    hbf = interpolate_to_chainage(xobs, median.(skipmissing.(eachrow(Hobs))), x)
+    hbf = interpolate_to_chainage(xobs, _row_median.(eachrow(Hobs)), x)
     hbf_itp = PCHIPInterpolation(hbf, x; extrapolation=ExtrapolationType.Linear)
     H_f, W_f, valid = obs_chainage(xobs, Hobs, Wobs, min_slope)
     W = zeros(nx, nt)
