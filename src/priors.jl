@@ -40,20 +40,13 @@ Derive prior distributions from the SoS (SWORD of Science) database.
 Returns a `SWOTPriors` or `missing` if discharge prior cannot be constructed.
 """
 function priors(sosfile::String, hmin::Float64, reachid::Int)
-    NCDataset(sosfile) do f
-        gr = NCDatasets.group(f, "reaches")
+    Dataset(sosfile) do f
+        gr = f.group["reaches"]
         i  = findall(gr["reach_id"][:] .== reachid)[1]
         # roughness
-        g   = NCDatasets.group(NCDatasets.group(f, "gbpriors"), "reach")
-        n_l = exp(g["lowerbound_logn"][i])
-        n_u = exp(g["upperbound_logn"][i])
-        np  = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.10) end
+        np = Uniform(0.01, 0.10)
         # channel shape parameter
-        r_m = exp(g["logr_hat"][i])
-        r_s = exp(g["logr_sd"][i])
-        r_l = exp(g["lowerbound_logr"][i])
-        r_u = exp(g["upperbound_logr"][i])
-        rp  = try truncated(Normal(r_m, r_s), r_l, r_u) catch; Uniform(1.0, 10.0) end
+        rp = Uniform(0.5, 10.0)
         # discharge
         m   = NCDatasets.group(f, "model")
         q_m = m["mean_q"][i]
