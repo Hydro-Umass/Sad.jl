@@ -1,39 +1,12 @@
 ### Run SAD algorithm with SWOT data
 
 using Sad
-using ArgParse
 using DelimitedFiles
 using Distributions
-using JSON
 using LinearAlgebra
 using NCDatasets
-using PyCall
 
 const FILL = -999999999999
-
-"""
-    get_reach_files(indir, reachjson)
-
-Get reach file names and download SoS file.
-
-"""
-function get_reach_files(indir, tmpdir, reachjson, index, sosbucket)
-    data = Ref{Dict{String, Any}}
-    open(joinpath(indir, reachjson)) do jf
-        data = read(jf, String)
-    end
-
-    reachlist = JSON.parse(data)[index]
-    if !isempty(sosbucket)
-        sosfile = joinpath(tmpdir, reachlist["sos"])
-        pushfirst!(pyimport("sys")."path", "/app/sos_read")   # Load sos_read script
-        downloadsos = pyimport("sos_read")["download_sos"]
-        downloadsos(sosbucket, sosfile)
-        reachlist["reach_id"], joinpath(indir, "swot", reachlist["swot"]), sosfile, joinpath(indir, "sword", reachlist["sword"])
-    else
-        reachlist["reach_id"], joinpath(indir, "swot", reachlist["swot"]), joinpath(indir, "sos", reachlist["sos"]), joinpath(indir, "sword", reachlist["sword"])
-    end
-end
 
 """
     read_swot_obs(ncfile, nids)
@@ -48,11 +21,11 @@ Load SWOT observations.
 """
 function read_swot_obs(ncfile::String, nids::Vector{Int})
     Dataset(ncfile) do ds
-        nodes = NCDatasets.group(ds, "node")
-        reaches = NCDatasets.group(ds, "reach")
-        S = permutedims(nodes["slope2"][:])
-        H = permutedims(nodes["wse"][:])
-        W = permutedims(nodes["width"][:])
+        nodes = ds.group["node"]
+        reaches = ds.group["reach"]
+        S = permutedims(nodes["slope2"][:, :])
+        H = permutedims(nodes["wse"][:, :])
+        W = permutedims(nodes["width"][:, :])
         dA = reaches["d_x_area"][:]
         dA = convert(Vector{Sad.FloatM}, dA)
         Hr = convert(Vector{Sad.FloatM}, reaches["wse"][:])
@@ -64,10 +37,8 @@ function read_swot_obs(ncfile::String, nids::Vector{Int})
         nid = nodes["node_id"][:]
         dmap = Dict(nid[k] => k for k=1:length(nid))
         i = [dmap[k] for k in nids]
-        time_str_var = reaches["time_str"].var
-        time_str_raw = permutedims(time_str_var[:])
-        time_str = [join(time_str_raw[i, :]) for i in 1:size(time_str_raw, 1)]
-
+        time = reaches["time"][:]
+        time_str = [string(t) for t in time]
 
         H[i, :], W[i, :], S[i, :], dA, Hr, Wr, Sr, time_str
     end
@@ -86,7 +57,7 @@ Retrieve information about river reach cross sections.
 """
 function river_info(id::Int, swordfile::String)
     Dataset(swordfile) do fd
-        g = NCDatasets.group(fd, "nodes")
+        g = fd.group["nodes"]
         i = findall(g["reach_id"][:] .== id)
         nid = g["node_id"][i]
         x = g["dist_out"][i]
@@ -129,60 +100,12 @@ function write_output(reachid, valid, outdir, A0, n, Qa, Qu, W, time_str)
 end
 
 """
-    parse_commandline(r)
-
-Parse command line for arguments.
-
-"""
-function parse_commandline()
-    s = ArgParseSettings()
-    @add_arg_table s begin
-        "--index", "-i"
-            help = "Index of reach to run on"
-            arg_type = Int
-            default = 0
-        "--reachfile", "-r"
-            help = "Name of reaches JSON file"
-            arg_type = String
-            default = "reaches.json"
-        "--bucketkey", "-b"
-            help = "Bucket and key prefix to download SoS from"
-            arg_type = String
-            default = ""
-    end
-
-    return parse_args(s)
-end
-
-"""
     main()
 
 Main driver routine.
 
 """
-function main()
-    indir = joinpath("/mnt", "data", "input")
-    outdir = joinpath("/mnt", "data", "output")
-    tmpdir = joinpath("/tmp")
-
-    parsed_args = parse_commandline()
-    if parsed_args["index"] == -256
-        index = try parse(Int64, ENV["AWS_BATCH_JOB_ARRAY_INDEX"]) + 1 catch KeyError 1 end
-    else
-        index = parsed_args["index"] + 1
-    end
-
-    reachfile = parsed_args["reachfile"]
-    bucketkey = parsed_args["bucketkey"]
-    println("Index: $(index)")
-    println("Reach File: $(reachfile)")
-    println("Bucket Key: $(bucketkey)")
-
-    reachid, swotfile, sosfile, swordfile = get_reach_files(indir, tmpdir, reachfile, index, bucketkey)
-    println("Reach ID: $(reachid)")
-    println("SWOT: $(swotfile)")
-    println("SOS: $(sosfile)")
-    println("SWORD: $(swordfile)")
+function main(reachid, swordfile, sosfile, swotfile)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
@@ -196,8 +119,8 @@ function main()
         end
     A0 = missing
     n = missing
-    Qa = Array{Missing}(missing, 1, size(W, 2))
-    Qu = Array{Missing}(missing, 1, size(W, 2))
+    Qa = Matrix{Sad.FloatM}(missing, 1, size(W, 2))
+    Qu = Matrix{Sad.FloatM}(missing, 1, size(W, 2))
     if all(ismissing, H) || all(ismissing, W) || all(ismissing, S)
         println("$(reachid): INVALID")
         write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
@@ -211,8 +134,8 @@ function main()
                 res = Sad.infer(p, reach)
                 A0  = Sad.compute_A0(reach, res.reach_ensemble)
                 n   = mean(res.reach_ensemble[1, :])
-                Qa[1, :]  = res.Q_post
-                Qu[1, :]  = [isnothing(res.A_post[t]) ? NaN : std(exp.(res.A_post[t][1,:])) for t in 1:reach.nt]
+                Qa[1, :]  = [isnan(q) ? missing : q for q in res.Q_post]
+                Qu[1, :] = [isnothing(res.A_post[t]) ? missing : std(res.A_post[t][1, :]) for t in 1:reach.nt]
                 println("$(reachid): VALID")
                 write_output(reachid, 1, outdir, A0, n, Qa, Qu, W, time_str)
             catch
@@ -222,5 +145,3 @@ function main()
         end
     end
 end
-
-main()
