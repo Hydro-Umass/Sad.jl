@@ -70,22 +70,21 @@ end
 function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Matrix{FloatM}, Sobs :: Matrix{FloatM}; dx :: Float64 = 200.0, min_slope :: Float64 = 1e-5)
     xobs, Hobs, Wobs, Sobs = drop_unobserved!(xobs, Hobs, Wobs, Sobs)
     nobs, nt = size(Hobs)
+    x = build_chainage(xobs, dx)
+    nx = length(x)
     # if all SWOT observations are missing after dropping unobserved nodes,
     # return an empty reach with no valid timesteps
     if nobs == 0 || all(ismissing, Hobs) || all(ismissing, Wobs)
-        x_empty  = [0.0]
-        itp_zero = PCHIPInterpolation([0.0], [0.0]; extrapolation=ExtrapolationType.Linear)
+        itp_zero = PCHIPInterpolation(zeros(length(x)), x; extrapolation=ExtrapolationType.Linear)
         return SWOTReach(
             SWOTObs(xobs, Hobs, Wobs),
-            x_empty,
+            x,
             zeros(1, nt), zeros(1, nt),
             falses(nt),
             itp_zero, itp_zero, itp_zero, itp_zero,
             0.0, 1, 0, nt,
         )
     end
-    x = build_chainage(xobs, dx)
-    nx = length(x)
     S0obs = estimate_bed_slope(Sobs, min_slope)
     S0 = interpolate_to_chainage(xobs, S0obs, x)
     S0 = max.(S0, min_slope)
@@ -160,7 +159,7 @@ function obs_chainage(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: M
         w = Wobs[:, t]
         good_h = findall(.!ismissing.(h))
         good_w = findall(.!ismissing.(w))
-        if length(good_h) < 2
+        if length(good_h) < 2 || length(good_w) < 2
             continue
         end
         itp_w = PCHIPInterpolation(convert(Vector{Float64}, w[good_w]), xobs[good_w]; extrapolation=ExtrapolationType.Linear)

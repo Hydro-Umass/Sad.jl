@@ -11,8 +11,8 @@ const TESTDATA = joinpath(@__DIR__, "testdata.nc")
 """Load test reach and priors from testdata.nc."""
 function load_test_data()
     Dataset(TESTDATA) do f
-        g    = NCDatasets.group(f, "XS_Timeseries")
-        ri   = NCDatasets.group(f, "River_Info")
+        g    = f.group["XS_Timeseries"]
+        ri   = f.group["River_Info"]
         qwbm = Float64(ri["QWBM"][1])
         x    = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
         H    = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, :])
@@ -285,7 +285,7 @@ end
     end
 
     Dataset(TESTDATA) do f
-        g    = NCDatasets.group(f, "XS_Timeseries")
+        g    = f.group["XS_Timeseries"]
         x    = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
         H    = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, :])
         W    = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, :])
@@ -298,7 +298,7 @@ end
             # no valid timesteps
             @test sum(reach_miss.valid) == 0
             # infer should not error
-            res = Sad.infer(p, reach_miss; N=10, max_attempts=100)
+            res = Sad.infer(p, reach_miss; N=10)
             @test all(isnan.(res.Q_post))
         end
 
@@ -307,7 +307,7 @@ end
             reach_miss = Sad.preprocess(x, H, W_miss, S)
             # no valid timesteps since W is missing
             @test sum(reach_miss.valid) == 0
-            res = Sad.infer(p, reach_miss; N=10, max_attempts=100)
+            res = Sad.infer(p, reach_miss; N=10)
             @test all(isnan.(res.Q_post))
         end
 
@@ -316,7 +316,7 @@ end
             W_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(W)...))
             reach_miss = Sad.preprocess(x, H_miss, W_miss, S)
             @test sum(reach_miss.valid) == 0
-            res = Sad.infer(p, reach_miss; N=10, max_attempts=100)
+            res = Sad.infer(p, reach_miss; N=10)
             @test all(isnan.(res.Q_post))
         end
 
@@ -326,7 +326,7 @@ end
             reach_one = Sad.preprocess(x, H_one, W, S)
             # only one timestep, not enough for rejection sampling but should not error
             @test sum(reach_one.valid) <= 1
-            res = Sad.infer(p, reach_one; N=10, max_attempts=100)
+            res = Sad.infer(p, reach_one; N=10)
             @test length(res.Q_post) == reach_one.nt
         end
 
@@ -336,7 +336,7 @@ end
             reach_half = Sad.preprocess(x, H, W_half, S)
             # should still have valid timesteps for even-indexed times
             @test sum(reach_half.valid) > 0
-            res = Sad.infer(p, reach_half; N=50, max_attempts=2_000)
+            res = Sad.infer(p, reach_half; N=50)
             @test length(res.Q_post) == reach_half.nt
             # valid timesteps should have posterior estimates
             valid_ts = findall(reach_half.valid)

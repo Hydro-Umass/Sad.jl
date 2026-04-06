@@ -145,7 +145,7 @@ function infer(priors::SWOTPriors, reach::SWOTReach;
     # refine reach parameter prior
     # return early if no valid timesteps
     if sum(reach.valid) == 0
-        @warn "No valid timesteps — returning empty posterior"
+        @warn "No valid timesteps: returning empty posterior"
         return (
             reach_ensemble = Matrix{Float64}(undef, 4, 0),
             Q_post         = fill(NaN, reach.nt),
