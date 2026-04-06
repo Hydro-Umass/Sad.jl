@@ -105,18 +105,13 @@ end
 Main driver routine.
 
 """
-function main(reachid, swordfile, sosfile, swotfile)
+function main(reachid, swordfile, sosfile, swotfile, outdir)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
 
-    try
-        reach = Sad.preprocess(x, H, W, S)
-    catch e
-        if e isa MethodError
-            println("Error loading swot observation")
-            end
-        end
+    reach = Sad.preprocess(x, H, W, S)
+
     A0 = missing
     n = missing
     Qa = Matrix{Sad.FloatM}(missing, 1, size(W, 2))
