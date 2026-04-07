@@ -72,10 +72,9 @@ function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Mat
     nobs, nt = size(Hobs)
     x = build_chainage(xobs, dx)
     nx = length(x)
-    # if all SWOT observations are missing after dropping unobserved nodes,
-    # return an empty reach with no valid timesteps
-    if nobs == 0 || all(ismissing, Hobs) || all(ismissing, Wobs)
-        itp_zero = PCHIPInterpolation(zeros(length(x)), x; extrapolation=ExtrapolationType.Linear)
+    # if  less than 2 nodes have valid SWOT observations then return an empty reach with no valid timesteps
+    if nobs < 2 || all(ismissing, Hobs) || all(ismissing, Wobs)
+        itp_zero = PCHIPInterpolation(zeros(3), zeros(3); extrapolation=ExtrapolationType.Linear)
         return SWOTReach(
             SWOTObs(xobs, Hobs, Wobs),
             x,
