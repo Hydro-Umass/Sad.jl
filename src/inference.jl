@@ -140,10 +140,22 @@ function infer(priors::SWOTPriors, reach::SWOTReach;
                eps_abs_q::Float64           = 1.0,
                n_bins::Int                  = 5,
                rho::Float64                 = 1.05,
-               completeness_weight::Bool    = true)
+               completeness_weight::Bool    = true,
+               time_str::Vector{String}     = String[])
+
+    # parse months from time strings if provided and Qp is monthly
+    months = if !isempty(time_str) && priors.Qp isa Vector
+        map(time_str) do s
+            try Month(DateTime(s)).value
+            catch; 1
+            end
+        end
+    else
+        fill(1, reach.nt)
+    end
 
     # refine reach parameter prior
-    # return early if no valid timesteps
+    # return early if no valid timesteps, e.g. all observations missing
     if sum(reach.valid) == 0
         @warn "No valid timesteps: returning empty posterior"
         return (
@@ -155,7 +167,7 @@ function infer(priors::SWOTPriors, reach::SWOTReach;
         )
     end
     rep_ts         = select_representative_timesteps(reach; n_bins=n_bins)
-    reach_ensemble = rejection_sample(priors, reach;
+    reach_ensemble = rejection_sample(priors, reach, months;
                                       N=N, ε_rel=eps_rel, n_bins=n_bins)
     if size(reach_ensemble, 2) == 0
         error("Rejection sampling produced no accepted samples.")
@@ -178,7 +190,8 @@ function infer(priors::SWOTPriors, reach::SWOTReach;
     @showprogress "Timesteps" for t in valid_ts
 
         # --- Stage 2: Q ensemble conditioned on upstream WSE ---
-        Q_ens, member_idx = q_ensemble(priors, reach_ensemble, reach, t;
+        Q_ens, member_idx = q_ensemble(priors, reach_ensemble, reach, t,
+                                        months[t];
                                         eps_abs=eps_abs_q)
         if isempty(Q_ens)
             @warn "Skipping timestep $t: empty Q ensemble"

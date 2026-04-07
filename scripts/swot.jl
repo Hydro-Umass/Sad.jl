@@ -126,7 +126,7 @@ function main(reachid, swordfile, sosfile, swotfile, outdir)
             write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
         else
             try
-                res = Sad.infer(p, reach)
+                res = Sad.infer(p, reach, time_str=time_str)
                 A0  = Sad.compute_A0(reach, res.reach_ensemble)
                 n   = mean(res.reach_ensemble[1, :])
                 Qa[1, :]  = [isnan(q) ? missing : q for q in res.Q_post]
