@@ -96,7 +96,7 @@ function gvf_solve(Q::Real, n::Real, r::Real, α::Real, z0::Real, H_bc::Real,
     p       = (Q, n, r, α, S0_itp, wbf_itp, hbf_itp, z_itp, z0)
     prob    = ODEProblem(gvf_rhs, y_bc, (x[1], x[end]), p)
     sol     = try
-        solve(prob, Tsit5(),
+        solve(prob, AutoTsit5(Rosenbrock23()),
               abstol=1e-3, reltol=1e-3,
               saveat=saveat, maxiters=10_000)
     catch
