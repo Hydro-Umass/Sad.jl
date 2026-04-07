@@ -1,5 +1,6 @@
 using Distributions
 using NCDatasets
+using Dates
 
 """
 River planform classification used to set uninformative prior bounds on
@@ -13,14 +14,16 @@ the Dingman shape exponent `r`.
 Prior distributions for all inferred parameters in the SAD algorithm.
 
 # Fields
-- `Qp`: discharge prior
+- `Qp`: discharge priors — either a single `Distribution` (time-invariant)
+        or a `Vector{Distribution}` of length 12 (one per calendar month)
+        when monthly ML priors are available from the SoS database.
 - `np`: Manning roughness coefficient prior
 - `rp`: Dingman shape exponent prior
 - `zp`: downstream bed elevation prior
 - `ap`: slope correction factor prior (centered on 1)
 """
 struct SWOTPriors
-    Qp :: Distribution
+    Qp :: Union{Distribution, Vector{<:Distribution}}
     np :: Distribution
     rp :: Distribution
     zp :: Distribution
@@ -28,9 +31,28 @@ struct SWOTPriors
 end
 
 """
+    monthly_q_prior(priors, month) -> Distribution
+
+Return the discharge prior for a given calendar month (1-12).
+If `priors.Qp` is a single distribution (no monthly data), returns it
+directly. If it is a 12-element vector, returns the distribution for
+the given month.
+"""
+function monthly_q_prior(priors::SWOTPriors, month::Int)
+    if priors.Qp isa Vector
+        return priors.Qp[month]
+    else
+        return priors.Qp
+    end
+end
+
+"""
     priors(sosfile, hmin, reachid)
 
 Derive prior distributions from the SoS (SWORD of Science) database.
+
+Uses monthly ML discharge priors if available (`monthly_q` group),
+otherwise falls back to the time-invariant model mean.
 
 # Arguments
 - `sosfile`: path to SoS NetCDF file
@@ -62,21 +84,73 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         if ismissing(q_m)
             return missing
         end
-        qm = log(q_m) - 2.0^2 / 2
-        qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
-        # Upper bound widened to 20x mean Q to capture extreme flood events
-        # beyond the 10x bound which excludes truth at high-flow reaches
-        Qp = try
-            truncated(LogNormal(qm, 2.0), q_l, q_u)
-        catch
-            truncated(LogNormal(qm, 2.0), 0.1 * q_m, 20 * q_m)
-        end
+        Qp = _build_q_prior(f, i, q_m, q_l, q_u)
         # bed elevation
         z0_est = hmin - 5.0
         zp = Uniform(z0_est - 3.0, z0_est + 3.0)
         # slope correction
         ap = LogNormal(0.0, 0.2)
         SWOTPriors(Qp, np, rp, zp, ap)
+    end
+end
+
+"""
+    _build_q_prior(f, i, q_m, q_l, q_u) -> Distribution or Vector{Distribution}
+
+Build discharge prior(s) from SoS dataset. Uses monthly ML priors if the
+`monthly_q` group exists and has valid data for reach index `i`, otherwise
+falls back to a single time-invariant truncated LogNormal.
+"""
+function _build_q_prior(f::NCDataset, i::Int,
+                        q_m::Real, q_l::Real, q_u::Real)
+    g = f.group["model"]
+    if haskey(g, "monthly_q") && size(g["monthly_q"], 1) == 12
+        monthly_means = g["monthly_q"][:, i]
+        if !any(ismissing, monthly_means) && all(monthly_means .> 0)
+            return _monthly_distributions(monthly_means, q_l, q_u, q_m)
+        end
+    end
+    # fall back to time-invariant prior
+    return _single_q_prior(q_m, q_l, q_u)
+end
+
+"""
+    _monthly_distributions(monthly_means, q_l, q_u, q_m_annual)
+
+Build a 12-element Vector{Distribution} of truncated LogNormals,
+one per calendar month. Each distribution is centred on the monthly
+ML mean with σ=2 in log-space (wide enough to cover uncertainty in
+the ML estimate), truncated to [q_l, q_u * 20].
+"""
+function _monthly_distributions(monthly_means::Vector,
+                                 q_l::Real, q_u::Real,
+                                 q_m_annual::Real)
+    map(1:12) do mo
+        qm_mo = Float64(monthly_means[mo])
+        logmu = log(qm_mo) - 2.0^2 / 2
+        logmu = isinf(logmu) ? log(q_m_annual) : logmu
+        q_hi  = max(q_u, 20 * qm_mo)
+        q_lo  = max(q_l, 0.01)
+        try
+            truncated(LogNormal(logmu, 2.0), q_lo, q_hi)
+        catch
+            truncated(LogNormal(logmu, 2.0), 0.1 * qm_mo, 20 * qm_mo)
+        end
+    end
+end
+
+"""
+    _single_q_prior(q_m, q_l, q_u) -> Distribution
+
+Build a single time-invariant truncated LogNormal discharge prior.
+"""
+function _single_q_prior(q_m::Real, q_l::Real, q_u::Real)
+    qm = log(q_m) - 2.0^2 / 2
+    qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
+    try
+        truncated(LogNormal(qm, 2.0), q_l, q_u)
+    catch
+        truncated(LogNormal(qm, 2.0), 0.1 * q_m, 20 * q_m)
     end
 end
 
@@ -98,8 +172,6 @@ Construct uninformative priors when SoS data are unavailable.
 function priors(qwbm::Float64, hmin::Float64, class::River;
                 reach=nothing)
     rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
-    # Upper bound widened to 20x mean Q to capture extreme flood events
-    # (10x was excluding truth at high-flow reaches)
     Qp = truncated(LogNormal(log(qwbm) - 2.0^2 / 2, 2.0), 0.1 * qwbm, 20 * qwbm)
     n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
     np = Uniform(n_lo, 0.07)
