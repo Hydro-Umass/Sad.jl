@@ -18,6 +18,9 @@ jobs:
         with:
           version: '1.12'
 
+      - name: Cache Julia depot
+        uses: julia-actions/cache@v3
+
       - name: Instantiate and precompile
         uses: julia-actions/julia-buildpkg@v1
 
