@@ -62,7 +62,8 @@ across representative timesteps).
 Returns a (4 × N_accepted) matrix with rows [n, r, z0, α].
 Q is not included — it is handled per-timestep by q_ensemble.
 """
-function rejection_sample(priors::SWOTPriors, reach::SWOTReach;
+function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
+                          months::Vector{Int} = fill(1, reach.nt);
                           N::Int            = 500,
                           ε_rel::Float64    = 0.5,
                           max_attempts::Int = 20_000,
@@ -97,8 +98,9 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach;
         rmse_all = Float64[]
         failed   = false
 
-        for obs in obs_per_t
-            Q_t  = rand(priors.Qp)
+        for (obs, t) in zip(obs_per_t, rep_ts)
+            Qp_t = monthly_q_prior(priors, months[t])
+            Q_t  = rand(Qp_t)
             pred = gvf_solve(Q_t, n_draw, r_draw, α, z0, obs.H_bc, reach;
                              saveat=obs.x)
             if isnothing(pred)
@@ -146,7 +148,8 @@ Returns (Float64[], Int[]) if no Q values are accepted.
 function q_ensemble(priors::SWOTPriors,
                     reach_ensemble::Matrix{Float64},
                     reach::SWOTReach,
-                    t::Int;
+                    t::Int,
+                    month::Int = 1;
                     eps_abs::Float64 = 1.0,
                     n_tries::Int     = 10)
     empty_result = (Float64[], Int[])
@@ -163,10 +166,10 @@ function q_ensemble(priors::SWOTPriors,
     H_bc          = reach.H[1, t]
     N             = size(reach_ensemble, 2)
 
-    # Sample Q uniformly across the prior support — ppf(0.999) captures
-    # extreme floods beyond what the lognormal concentrates mass around
-    Q_lo = quantile(priors.Qp, 0.01)
-    Q_hi = quantile(priors.Qp, 0.999)
+    # sample Q uniformly across the monthly prior support
+    Qp_t = monthly_q_prior(priors, month)
+    Q_lo = quantile(Qp_t, 0.01)
+    Q_hi = quantile(Qp_t, 0.999)
 
     accepted_Q   = Dict{Int, Float64}()
     tile_idx     = repeat(1:N, n_tries)
