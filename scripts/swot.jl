@@ -121,7 +121,7 @@ function main(reachid, swordfile, sosfile, swotfile, outdir)
         write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
     else
         p = Sad.priors(sosfile, reach.hmin, reachid)
-        if ismissing(p.Qp)
+        if ismissing(p)
             println("$(reachid): INVALID, missing mean discharge")
             write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
         else
