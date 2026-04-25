@@ -362,7 +362,7 @@ end
             #mMake nodes 5-10 fully missing
             H_sparse[5:10, :] .= missing
             W_sparse[5:10, :] .= missing
-            x_out, H_out, W_out, S_out = Sad.drop_unobserved!(
+            x_out, H_out, W_out, S_out = Sad.drop_unobserved(
                 copy(x),
                 convert(Matrix{Sad.FloatM}, H_sparse),
                 convert(Matrix{Sad.FloatM}, W_sparse),

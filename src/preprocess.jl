@@ -49,12 +49,12 @@ struct SWOTReach{I}
 end
 
 """
-    drop_unobserved!(x, H, W, S)
+    drop_unobserved(x, H, W, S)
 
 Remove SWOT nodes that have no valid observations in either H or W across
 all time steps. Resets chainage to start from zero.
 """
-function drop_unobserved!(x :: Vector{Float64}, H :: Matrix{FloatM}, W :: Matrix{FloatM}, S :: Matrix{FloatM})
+function drop_unobserved(x :: Vector{Float64}, H :: Matrix{FloatM}, W :: Matrix{FloatM}, S :: Matrix{FloatM})
     valid = [j for j in 1:size(H, 1)
              if !all(ismissing, H[j, :]) && !all(ismissing, W[j, :])]
     if isempty(valid)
@@ -68,7 +68,7 @@ end
         preprocess(xobs, Hobs, Wobs, Sobs, dx, min_slope)
 """
 function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Matrix{FloatM}, Sobs :: Matrix{FloatM}; dx :: Float64 = 200.0, min_slope :: Float64 = 1e-5)
-    xobs, Hobs, Wobs, Sobs = drop_unobserved!(xobs, Hobs, Wobs, Sobs)
+    xobs, Hobs, Wobs, Sobs = drop_unobserved(xobs, Hobs, Wobs, Sobs)
     nobs, nt = size(Hobs)
     x = build_chainage(xobs, dx)
     nx = length(x)
