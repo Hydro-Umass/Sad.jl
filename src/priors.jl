@@ -63,8 +63,10 @@ Returns a `SWOTPriors` or `missing` if discharge prior cannot be constructed.
 """
 function priors(sosfile::String, hmin::Float64, reachid::Int)
     Dataset(sosfile) do f
-        gr = f.group["reaches"]
-        i  = findall(gr["reach_id"][:] .== reachid)[1]
+        gr   = f.group["reaches"]
+        idxs = findall(gr["reach_id"][:] .== reachid)
+        isempty(idxs) && return missing
+        i = idxs[1]
         # roughness
         g = f.group["gbpriors"].group["reach"]
         n_l = exp(g["lowerbound_logn"][i])
