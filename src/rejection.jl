@@ -74,7 +74,8 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
         return Matrix{Float64}(undef, 4, 0)
     end
 
-    H_ref = median(reach.H[1, reach.valid])
+    h_ds  = reach.H[1, reach.valid]
+    H_ref = max(maximum(h_ds) - minimum(h_ds), 1.0)
 
     obs_per_t = map(rep_ts) do t
         good = findall(.!ismissing.(reach.obs.H[:, t]))
@@ -166,6 +167,16 @@ function q_ensemble(priors::SWOTPriors,
     H_bc          = reach.H[1, t]
     N             = size(reach_ensemble, 2)
 
+    # scale acceptance window to 10% of WSE range at the upstream node
+    h_up_valid = [Float64(reach.obs.H[upstream_node, tt])
+                  for tt in findall(reach.valid)
+                  if !ismissing(reach.obs.H[upstream_node, tt])]
+    eps_use = if length(h_up_valid) >= 2
+        0.1 * max(maximum(h_up_valid) - minimum(h_up_valid), 1.0)
+    else
+        eps_abs
+    end
+
     # sample Q uniformly across the monthly prior support
     Qp_t = monthly_q_prior(priors, month)
     Q_lo = quantile(Qp_t, 0.01)
@@ -184,7 +195,7 @@ function q_ensemble(priors::SWOTPriors,
                          saveat=x_up)
         isnothing(pred) && continue
 
-        if abs(pred[1] - H_obs_up) < eps_abs
+        if abs(pred[1] - H_obs_up) < eps_use
             accepted_Q[member] = Q_try
         end
     end
