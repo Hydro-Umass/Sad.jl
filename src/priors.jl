@@ -176,8 +176,8 @@ Construct uninformative priors when SoS data are unavailable.
 function priors(qwbm::Float64, hmin::Float64, class::River;
                 reach=nothing)
     rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
-    q_cv = 2.0
-    Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 20 * qwbm)
+    q_cv = 1.0
+    Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 10 * qwbm)
     n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
     np = Uniform(n_lo, 0.07)
     rp = Uniform(rbnds[Int(class)]...)
