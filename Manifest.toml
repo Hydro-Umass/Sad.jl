@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "4c696c2fdabf30ab6917a9bc4e16a8aacc24a263"
+project_hash = "20663d72b0cc39fb033edc510cdbbb9da2fdd585"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -131,6 +131,22 @@ weakdeps = ["SparseArrays"]
 
     [deps.ArrayLayouts.extensions]
     ArrayLayoutsSparseArraysExt = "SparseArrays"
+
+[[deps.ArraysOfArrays]]
+deps = ["Statistics"]
+git-tree-sha1 = "8e64c97ac7bffbd3327d8ddadf8dad26b87a2664"
+uuid = "65a8f2f4-9b39-5baf-92e2-a9cc46fdf018"
+version = "0.6.6"
+
+    [deps.ArraysOfArrays.extensions]
+    ArraysOfArraysAdaptExt = "Adapt"
+    ArraysOfArraysChainRulesCoreExt = "ChainRulesCore"
+    ArraysOfArraysStaticArraysCoreExt = "StaticArraysCore"
+
+    [deps.ArraysOfArrays.weakdeps]
+    Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    StaticArraysCore = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -585,6 +601,12 @@ version = "1.17.0"
 deps = ["ArgTools", "FileWatching", "LibCURL", "NetworkOptions"]
 uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
+
+[[deps.EmpiricalDistributions]]
+deps = ["Adapt", "ArraysOfArrays", "Distributions", "LinearAlgebra", "Random", "Statistics", "StatsBase"]
+git-tree-sha1 = "ef1c70f32e6d26adfa197128ecd2edc83820161f"
+uuid = "0bbb1fad-0f24-45fe-94a4-415852c5cc3b"
+version = "0.3.10"
 
 [[deps.EnumX]]
 git-tree-sha1 = "c49898e8438c828577f04b92fc9368c388ac783c"
@@ -1912,7 +1934,7 @@ uuid = "94e857df-77ce-4151-89e5-788b33177be4"
 version = "0.1.0"
 
 [[deps.Sad]]
-deps = ["DataInterpolations", "DelimitedFiles", "DifferentialEquations", "Distributions", "Documenter", "LinearAlgebra", "NCDatasets", "ProgressMeter", "Random", "Statistics"]
+deps = ["DataInterpolations", "Dates", "DelimitedFiles", "DifferentialEquations", "Distributions", "Documenter", "EmpiricalDistributions", "LinearAlgebra", "NCDatasets", "ProgressMeter", "Random", "Statistics", "StatsBase"]
 path = "."
 uuid = "86303e7b-04d2-42a2-bc71-7ba20542e124"
 version = "1.0.0"
