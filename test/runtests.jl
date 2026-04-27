@@ -15,10 +15,10 @@ function load_test_data()
         ri   = f.group["River_Info"]
         qwbm = Float64(ri["QWBM"][1])
         x    = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
-        H    = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, :])
-        W    = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, :])
-        Q    = g["Q"][end:-1:1, :]
-        S    = diff(H, dims=1) ./ diff(x)
+        H    = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, 1:10:end])
+        W    = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, 1:10:end])
+        Q    = g["Q"][end:-1:1, 1:10:end]
+        S    = (diff(H, dims=1) ./ diff(x))[:, 1:10:end]
         S    = convert(Matrix{Sad.FloatM}, [S[1, :]'; S])
         reach = Sad.preprocess(x, H, W, S)
         p     = Sad.priors(mean(Q[1, :]), reach.hmin, Sad.sinuous; reach)
@@ -230,7 +230,8 @@ end
 @testset "infer_channel_params" begin
     reach, p, _ = load_test_data()
 
-    pa = Sad.infer_channel_params(p, reach, 50)
+    months = fill(1, reach.nt)
+    pa = Sad.infer_channel_params(p, reach, months, 50)
 
     @testset "returns SWOTPriors" begin
         @test pa isa Sad.SWOTPriors
@@ -264,7 +265,7 @@ end
 @testset "infer" begin
     reach, p, Q_truth = load_test_data()
 
-    res = Sad.infer(p, reach; N=100)
+    res = Sad.infer(p, reach; N=100, σₒ=2.0)
 
     @testset "output structure" begin
         @test haskey(res, :Q_post)
