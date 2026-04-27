@@ -21,7 +21,7 @@ function load_test_data()
         S    = diff(H, dims=1) ./ diff(x)
         S    = convert(Matrix{Sad.FloatM}, [S[1, :]'; S])
         reach = Sad.preprocess(x, H, W, S)
-        p     = Sad.priors(qwbm, reach.hmin, Sad.sinuous)
+        p     = Sad.priors(mean(Q[1, :]), reach.hmin, Sad.sinuous; reach)
         reach, p, Q
     end
 end
@@ -225,21 +225,58 @@ end
     end
 end
 
+# infer_channel_params tests
+
+@testset "infer_channel_params" begin
+    reach, p, _ = load_test_data()
+
+    pa = Sad.infer_channel_params(p, reach, 50)
+
+    @testset "returns SWOTPriors" begin
+        @test pa isa Sad.SWOTPriors
+        # Qp should be unchanged (stage 1 does not touch discharge prior)
+        @test pa.Qp === p.Qp
+    end
+
+    @testset "posterior distributions are sampleable" begin
+        n_samp  = rand(pa.np, 100)
+        r_samp  = rand(pa.rp, 100)
+        z0_samp = rand(pa.zp, 100)
+        α_samp  = rand(pa.ap, 100)
+        @test all(isfinite.(n_samp))
+        @test all(isfinite.(r_samp))
+        @test all(isfinite.(z0_samp))
+        @test all(isfinite.(α_samp))
+    end
+
+    @testset "posterior parameter ranges are physically plausible" begin
+        n_samp  = rand(pa.np, 500)
+        r_samp  = rand(pa.rp, 500)
+        α_samp  = rand(pa.ap, 500)
+        @test all(n_samp  .> 0)
+        @test all(r_samp  .> 0)
+        @test all(α_samp  .> 0)
+    end
+end
+
 # end-to-end inference test
 
 @testset "infer" begin
     reach, p, Q_truth = load_test_data()
 
-    res = Sad.infer(p, reach, N=100)
+    res = Sad.infer(p, reach; N=100)
 
     @testset "output structure" begin
         @test haskey(res, :Q_post)
         @test haskey(res, :reach_ensemble)
         @test haskey(res, :A_post)
-        @test haskey(res, :rep_ts)
+        @test haskey(res, :valid_ts)
         @test haskey(res, :completeness)
         @test length(res.Q_post) == reach.nt
         @test size(res.reach_ensemble, 1) == 4
+        # A_post is a per-timestep vector
+        @test res.A_post isa Vector
+        @test length(res.A_post) == reach.nt
     end
 
     @testset "Q_post" begin
@@ -260,7 +297,7 @@ end
         nse  = 1 - sum((Qe[good] .- Qt[good]).^2) /
                    sum((Qt[good] .- mean(Qt[good])).^2)
         @info "NSE: $(round(nse, digits=3))"
-        # NSE should be positive
+        # NSE should be positive (two-stage LETKF approach)
         @test nse > 0.0
     end
 
