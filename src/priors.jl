@@ -87,8 +87,10 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
             return missing
         end
         Qp = _build_q_prior(f, i, q_m, q_l, q_u)
-        # bed elevation
-        z0_est = hmin - 5.0
+        # bed elevation — depth estimate scales with discharge magnitude
+        q_m_f     = Float64(q_m)
+        depth_est = q_m_f > 500.0 ? 7.0 : (q_m_f > 100.0 ? 5.0 : 3.0)
+        z0_est    = hmin - depth_est
         zp = Uniform(z0_est - 3.0, z0_est + 3.0)
         # slope correction
         ap = LogNormal(0.0, 0.2)
@@ -129,7 +131,7 @@ function _monthly_distributions(monthly_means::Vector,
                                  q_m_annual::Real)
     map(1:12) do mo
         qm_mo = Float64(monthly_means[mo])
-        logmu = log(qm_mo) - 2.0^2 / 2
+        logmu = log(qm_mo) - 1.0^2 / 2
         logmu = isinf(logmu) ? log(q_m_annual) : logmu
         q_hi  = max(q_u, 20 * qm_mo)
         q_lo  = max(q_l, 0.01)
@@ -174,7 +176,8 @@ Construct uninformative priors when SoS data are unavailable.
 function priors(qwbm::Float64, hmin::Float64, class::River;
                 reach=nothing)
     rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
-    Qp = truncated(LogNormal(log(qwbm) - 2.0^2 / 2, 2.0), 0.1 * qwbm, 20 * qwbm)
+    q_cv = 2.0
+    Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 20 * qwbm)
     n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
     np = Uniform(n_lo, 0.07)
     rp = Uniform(rbnds[Int(class)]...)
@@ -192,8 +195,8 @@ Otherwise falls back to a fixed depth estimate based on qwbm.
 """
 function z0_prior(qwbm::Float64, hmin::Float64, reach)
     if !isnothing(reach)
-        S_med = reach.S0(reach.x[end] / 2)
-        W_med = reach.wbf(reach.x[end] / 2)
+        S_med = reach.S0(reach.x[end])
+        W_med = reach.wbf(reach.x[end])
         n_est = qwbm > 500.0 ? 0.035 : 0.030
         S_use = max(S_med, 1e-5)
         depth_est = (n_est * qwbm / (W_med * sqrt(S_use)))^0.6
