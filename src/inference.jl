@@ -5,19 +5,6 @@ using EmpiricalDistributions
 using ProgressMeter
 
 """
-    obs_completeness(reach) -> Vector{Float64}
-
-Compute temporal data completeness for each SWOT node — the fraction of
-timesteps with a valid (non-missing) H observation. Used to inflate
-observation error for nodes that are frequently missing.
-"""
-function obs_completeness(reach::SWOTReach)
-    nobs, nt = size(reach.obs.H)
-    valid_frac = [count(.!ismissing.(reach.obs.H[j, :])) / nt for j in 1:nobs]
-    return clamp.(valid_frac, 1.0 / nt, 1.0)
-end
-
-"""
     compute_A0(reach, reach_ensemble) -> Float64
 
 Compute the reference cross-sectional area A0 at the minimum observed
@@ -165,13 +152,6 @@ function infer(p::SWOTPriors, reach::SWOTReach;
         fill(1, reach.nt)
     end
     pa = infer_channel_params(p, reach, months,  N, σₒ)
-    # accepted = rejection_sample(p, reach, months; N=N, ε_rel=1.0)
-    # pa = SWOTPriors(p.Qp,
-    #                 UvBinnedDist(fit(Histogram, accepted[1, :])),  # n
-    #                 UvBinnedDist(fit(Histogram, accepted[2, :])),  # r
-    #                 UvBinnedDist(fit(Histogram, accepted[3, :])),  # z0
-    #                 UvBinnedDist(fit(Histogram, accepted[4, :]))) # a
-    # pa = infer_channel_params(pa, reach, months, N, σₒ)
 
     # Stage 2: dynamic discharge via LETKF
     result = infer_discharge(pa, reach;
@@ -252,7 +232,6 @@ function infer_channel_params(p::SWOTPriors, reach::SWOTReach, months, N::Int = 
 
     R = fill(σₒ / sqrt(valid_obs), length(d[2:end])).^2
     Xa = letkf(X, d[2:end], HX, R)
-    println(Xa)
     return SWOTPriors(p.Qp,
                       UvBinnedDist(fit(Histogram, nbnds[1] .+ (nbnds[2] - nbnds[1]) .* logit1.(Xa[1, :]))),
                       UvBinnedDist(fit(Histogram, exp.(Xa[2, :]) .+ r_lb)),
