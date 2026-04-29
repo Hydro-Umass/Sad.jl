@@ -20,14 +20,12 @@ Prior distributions for all inferred parameters in the SAD algorithm.
 - `np`: Manning roughness coefficient prior
 - `rp`: Dingman shape exponent prior
 - `zp`: downstream bed elevation prior
-- `ap`: slope correction factor prior (centered on 1)
 """
 struct SWOTPriors
     Qp :: Union{Distribution, Vector{<:Distribution}}
     np :: Distribution
     rp :: Distribution
     zp :: Distribution
-    ap :: Distribution
 end
 
 """
@@ -71,7 +69,7 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         g = f.group["gbpriors"].group["reach"]
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
-        np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.10) end
+        np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
         # channel shape parameter
         r_m = exp(g["logr_hat"][i])
         r_s = exp(g["logr_sd"][i])
@@ -92,9 +90,7 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         depth_est = q_m_f > 500.0 ? 7.0 : (q_m_f > 100.0 ? 5.0 : 3.0)
         z0_est    = hmin - depth_est
         zp = Uniform(z0_est - 3.0, z0_est + 3.0)
-        # slope correction
-        ap = LogNormal(0.0, 0.2)
-        SWOTPriors(Qp, np, rp, zp, ap)
+        SWOTPriors(Qp, np, rp, zp)
     end
 end
 
@@ -182,8 +178,7 @@ function priors(qwbm::Float64, hmin::Float64, class::River;
     np = Uniform(n_lo, 0.07)
     rp = Uniform(rbnds[Int(class)]...)
     zp = z0_prior(qwbm, hmin, reach)
-    ap = LogNormal(0.0, 0.2)
-    SWOTPriors(Qp, np, rp, zp, ap)
+    SWOTPriors(Qp, np, rp, zp)
 end
 
 """

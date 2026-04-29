@@ -25,7 +25,7 @@ end
 ODE right-hand side for the Gradually-Varied-Flow equation, integrated
 upstream (x increases from downstream to upstream boundary).
 
-    dy/dx = -(S0(x)·α - Sf(y)) / (1 - Fr(y)² + ε)
+    dy/dx = -(S0(x) - Sf(y)) / (1 - Fr(y)² + ε)
 
 The negative sign arises because we integrate in the upstream direction
 (increasing x): WSE rises upstream so dy/dx > 0 for normal backwater, which
@@ -42,22 +42,21 @@ large low-gradient rivers observed by SWOT.
 - `p[1]` Q:       discharge [m³/s]
 - `p[2]` n:       Manning roughness coefficient
 - `p[3]` r:       Dingman shape exponent
-- `p[4]` α:       slope correction factor (S_actual = S0·α)
-- `p[5]` S0_itp:  interpolant for bed slope S0(x)
-- `p[6]` wbf_itp: interpolant for bankfull width Wb(x) [m]
-- `p[7]` hbf_itp: interpolant for bankfull WSE hbf(x) [m]
-- `p[8]` z_itp:   interpolant for cumulative bed elevation reference z(x) [m]
-- `p[9]` z0:      downstream bed elevation [m]
+- `p[4]` S0_itp:  interpolant for bed slope S0(x)
+- `p[5]` wbf_itp: interpolant for bankfull width Wb(x) [m]
+- `p[6]` hbf_itp: interpolant for bankfull WSE hbf(x) [m]
+- `p[7]` z_itp:   interpolant for cumulative bed elevation reference z(x) [m]
+- `p[8]` z0:      downstream bed elevation [m]
 """
 function gvf_rhs(y, p, x)
-    Q, n, r, α, S0_itp, wbf_itp, hbf_itp, z_itp, z0 = p
+    Q, n, r, S0_itp, wbf_itp, hbf_itp, z_itp, z0 = p
     y  = max(y, 0.01)
     Wb = wbf_itp(x)
-    # bed elevation at x: reference profile scaled by α, anchored at z0
-    # z(x) = z0 + z_ref(x)·α,  where z_ref[1] = 0 by construction
-    zx = z0 + z_itp(x) * α
+    # bed elevation at x: reference profile anchored at z0
+    # z(x) = z0 + z_ref(x),  where z_ref[1] = 0 by construction
+    zx = z0 + z_itp(x)
     Yb = max(hbf_itp(x) - zx, 0.01)
-    S0 = S0_itp(x) * α
+    S0 = S0_itp(x)
     A  = area(y, Wb, Yb, r)
     Sf = (n * Q / (A * y^(2/3)))^2
     Fr = Q / (A * sqrt(9.806 * y))
