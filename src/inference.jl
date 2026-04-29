@@ -24,13 +24,12 @@ where y is the mean flow depth at hmin and Ym = (r+1)/r * y.
 function compute_A0(reach::SWOTReach, reach_ensemble::Matrix{Float64})
     r_mean  = mean(reach_ensemble[2, :])
     z0_mean = mean(reach_ensemble[3, :])
-    α_mean  = mean(reach_ensemble[4, :])
 
     # downstream node geometry
     x_ds = reach.x[1]
     Wb   = reach.wbf(x_ds)                      # bankfull width [m]
     hbf  = reach.hbf(x_ds)                      # bankfull WSE [m]
-    zx   = z0_mean + reach.z(x_ds) * α_mean     # bed elevation at x_ds
+    zx   = z0_mean + reach.z(x_ds)              # bed elevation at x_ds
                                                   # = z0_mean since z(x[1])=0
     Yb   = max(hbf - zx, 0.01)                  # bankfull mean depth [m]
 
@@ -49,7 +48,7 @@ end
 
 Local Ensemble Transform Kalman Filter.
 
-State vector rows: [log(Q), n, r, z0, α]
+State vector rows: [log(Q), n, r, z0]
 Q is assimilated in log-space to enforce Q > 0 after the update and
 improve Gaussianity of the Q marginal distribution.
 
@@ -104,7 +103,7 @@ end
 Full SAD inference pipeline for a single SWOT reach.
 
 Two-stage approach:
-1. `infer_channel_params`: SIES with mean Q to estimate static hydraulic parameters [n, r, z0, α].
+1. `infer_channel_params`: SIES with mean Q to estimate static hydraulic parameters [n, r, z0].
 2. `infer_discharge`: LETKF per timestep to estimate dynamic Q conditioned on the parameter posterior.
 
 # Arguments
@@ -121,7 +120,7 @@ Two-stage approach:
 # Returns
 A `NamedTuple` with:
 - `Q_post`:         `Vector{Float64}` — posterior mean Q per timestep (NaN if invalid).
-- `reach_ensemble`: `Matrix{Float64}` — 4×N posterior parameter ensemble [n, r, z0, α].
+- `reach_ensemble`: `Matrix{Float64}` — 3×N posterior parameter ensemble [n, r, z0].
 - `A_post`:         per-timestep state ensemble from LETKF (or `nothing` for invalid timesteps).
 - `valid_ts`:       `Vector{Int}` — timestep indices with ≥ 2 valid observations.
 - `completeness`:   `nothing` (retained for backwards compatibility).
@@ -134,7 +133,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     valid_ts = findall(reach.valid)
     if isempty(valid_ts)
         @warn "infer: no valid timesteps — returning empty posterior"
-        return (reach_ensemble = Matrix{Float64}(undef, 4, 0),
+        return (reach_ensemble = Matrix{Float64}(undef, 3, 0),
                 Q_post         = fill(NaN, reach.nt),
                 A_post         = nothing,
                 valid_ts       = valid_ts,
@@ -151,12 +150,21 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     else
         fill(1, reach.nt)
     end
-    pa = infer_channel_params(p, reach, months,  N, σₒ)
+    # pa = infer_channel_params(p, reach, months,  N, σₒ)
+    samples = rejection_sample(p, reach, months; ε_rel=0.1)
+    pa = try
+        SWOTPriors(p.Qp,
+                   UvBinnedDist(fit(Histogram, samples[1, :], range(minimum(p.np), maximum(p.np), length=10))),
+                   UvBinnedDist(fit(Histogram, samples[2, :], range(minimum(p.rp), maximum(p.rp), length=10))),
+                   UvBinnedDist(fit(Histogram, samples[3, :], range(minimum(p.zp), maximum(p.zp), length=10))))
+    catch
+        infer_channel_params(p, reach, months,  N, σₒ)
+    end
 
     # Stage 2: dynamic discharge via LETKF
     result = infer_discharge(pa, reach;
                              sigma_obs=σₒ, N=N, time_str=time_str, rho=rho)
-    reach_ens = hcat(rand(pa.np, N), rand(pa.rp, N), rand(pa.zp, N), rand(pa.ap, N))' |> Matrix
+    reach_ens = hcat(rand(pa.np, N), rand(pa.rp, N), rand(pa.zp, N))' |> Matrix
     return (reach_ensemble = reach_ens,
             Q_post         = result.Q_post,
             A_post         = result.A_post,
@@ -169,12 +177,11 @@ function infer_channel_params(p::SWOTPriors, reach::SWOTReach, months, N::Int = 
     logit1(u) = 1 / (1 + exp(-u))
     zbnds = [minimum(p.zp), maximum(p.zp)]
     nbnds = [minimum(p.np), maximum(p.np)]
-    r_lb = minimum(p.rp)
-    X = zeros(4, N)
+    rbnds = [minimum(p.rp), maximum(p.rp)]
+    X = zeros(3, N)
     X[1, :] = logit.((rand(p.np, N) .- nbnds[1]) ./ (nbnds[2] - nbnds[1]))
-    X[2, :] = log.(rand(p.rp, N) .- r_lb)
+    X[2, :] = logit.((rand(p.rp, N) .- rbnds[1]) ./ (rbnds[2] - rbnds[1]))
     X[3, :] = logit.((rand(p.zp, N) .- zbnds[1]) ./ (zbnds[2] - zbnds[1]))
-    X[4, :] = rand(p.ap, N)
 
     rep_ts = select_representative_timesteps(reach; n_bins=5)
     obs_per_t = map(rep_ts) do t
@@ -193,10 +200,9 @@ function infer_channel_params(p::SWOTPriors, reach::SWOTReach, months, N::Int = 
             Qp_t = monthly_q_prior(p, o.month)
             Q_t = mean(Qp_t.untruncated)
             n_e = nbnds[1] + (nbnds[2] - nbnds[1]) * logit1(X[1, e])
-            r_e = exp(X[2, e]) + r_lb
+            r_e = exp(X[2, e]) + rbnds[1]
             z0_e = zbnds[1] + (zbnds[2] - zbnds[1]) * logit1(X[3, e])
-            a_e = X[4, e]
-            pred = gvf_solve(Q_t, n_e, r_e, a_e, z0_e, o.H_bc, reach;
+            pred = gvf_solve(Q_t, n_e, r_e, z0_e, o.H_bc, reach;
                              saveat=o.x)
             if isnothing(pred) || !all(isfinite.(pred))
                 HX[row:row+length(o.H)-2, e] .= NaN
@@ -232,11 +238,13 @@ function infer_channel_params(p::SWOTPriors, reach::SWOTReach, months, N::Int = 
 
     R = fill(σₒ / sqrt(valid_obs), length(d[2:end])).^2
     Xa = letkf(X, d[2:end], HX, R)
+    n_est = nbnds[1] .+ (nbnds[2] - nbnds[1]) .* logit1.(Xa[1, :])
+    r_est = rbnds[1] .+ (rbnds[2] - rbnds[1]) .* logit1.(Xa[2, :])
+    z_est = zbnds[1] .+ (zbnds[2] - zbnds[1]) .* logit1.(Xa[3, :])
     return SWOTPriors(p.Qp,
-                      UvBinnedDist(fit(Histogram, nbnds[1] .+ (nbnds[2] - nbnds[1]) .* logit1.(Xa[1, :]))),
-                      UvBinnedDist(fit(Histogram, exp.(Xa[2, :]) .+ r_lb)),
-                      UvBinnedDist(fit(Histogram, zbnds[1] .+ (zbnds[2] - zbnds[1]) .* logit1.(Xa[3, :]))),
-                      UvBinnedDist(fit(Histogram, Xa[4, :])))
+                      Uniform(mean(n_est) - max(std(n_est), 0.001), mean(n_est) + max(std(n_est), 0.001)),
+                      truncated(Normal(mean(r_est), max(std(r_est), 0.2)), rbnds[1], rbnds[2]),
+                      truncated(Normal(mean(z_est), max(std(z_est), 0.2)), zbnds[1], zbnds[2]))
 end
 
 """
@@ -261,8 +269,8 @@ then runs the LETKF update against observed WSE.
 `NamedTuple` with `Q_post` (length nt) and `A_post` (per-timestep state ensemble).
 """
 function infer_discharge(p::SWOTPriors, reach::SWOTReach;
-                         sigma_obs::Float64       = 0.1,
-                         N::Int                   = 500,
+                         sigma_obs::Float64       = 0.5,
+                         N::Int                   = 1000,
                          time_str::Vector{String} = String[],
                          rho::Float64             = 1.05)
     months = if !isempty(time_str) && p.Qp isa Vector
@@ -286,11 +294,9 @@ function infer_discharge(p::SWOTPriors, reach::SWOTReach;
     n_est = mean(p.np)
     r_est = mean(p.rp)
     z0_est = mean(p.zp)
-    a_est = mean(p.ap)
     n_ens = rand(p.np, N)
     r_ens = rand(p.rp, N)
     z0_ens = rand(p.zp, N)
-    a_ens = rand(p.ap, N)
     @showprogress "Timesteps" for t in valid_ts
         Q_ens  = rand(monthly_q_prior(p, months[t]), N)
         # A    = reshape(Q_ens, 1, N)
@@ -307,11 +313,10 @@ function infer_discharge(p::SWOTPriors, reach::SWOTReach;
         HA = zeros(length(d), n_q)
         good_ens = Int[]
         for k in 1:n_q
-            # pred = gvf_solve((A[1, k]), n_est, r_est, a_est, z0_est, H_bc, reach; saveat=x_obs)
-            pred = gvf_solve(exp(A[1, k]), n_ens[k], r_ens[k], a_ens[k], z0_ens[k], H_bc, reach; saveat=x_obs)
-            # pred = gvf_solve((A[1, k]), n_ens[k], r_ens[k], a_ens[k], z0_ens[k], H_bc, reach; saveat=x_obs)
+            pred = gvf_solve(exp(A[1, k]), n_ens[k], r_ens[k], z0_ens[k], H_bc, reach; saveat=x_obs)
             if !isnothing(pred) && all(isfinite.(pred))
-                HA[:, k] = pred
+                z_saveat = z0_ens[k] .+ reach.z.(x_obs)
+                HA[:, k] = compute_wse.(pred, z_saveat, r_ens[k])
                 push!(good_ens, k)
             end
         end

@@ -64,26 +64,52 @@ function gvf_rhs(y, p, x)
 end
 
 """
-    gvf_solve(Q, n, r, α, z0, H_bc, reach; saveat) → Vector{Float64} or nothing
+    compute_wse(y, z, r) → WSE
+
+Compute water-surface elevation from mean flow depth.
+
+    WSE = y * (r+1)/r + z
+
+where z is the bed elevation at the same location (Dingman Eq. 12).
+"""
+function compute_wse(y::Real, z::Real, r::Real)
+    y * (r + 1) / r + z
+end
+
+"""
+    compute_width(y, Wb, Yb, r) → W
+
+Compute water-surface width from mean flow depth (Dingman Eq. 13).
+
+    W = Wb * (y / Yb)^(1/r)
+
+where Yb is the bankfull mean depth (= (hbf - z) * r/(r+1)).
+"""
+function compute_width(y::Real, Wb::Real, Yb::Real, r::Real)
+    Wb * (y / Yb)^(1 / r)
+end
+
+"""
+    gvf_solve(Q, n, r, z0, H_bc, reach; saveat) → Vector{Float64} or nothing
 
 Solve the GVF equation for a single parameter set and return predicted
-water surface elevation at the locations specified by `saveat`.
+mean flow depth at the locations specified by `saveat`.
 
 # Arguments
 - `Q`:      discharge [m³/s]
 - `n`:      Manning roughness coefficient
 - `r`:      Dingman channel shape exponent
-- `α`:      slope correction factor (S_actual = S0·α)
 - `z0`:     downstream bed elevation [m]
 - `H_bc`:   downstream boundary WSE [m]  (use `reach.H[1, t]`)
 - `reach`:  `SWOTReach` from preprocessing stage
-- `saveat`: chainage locations at which to return WSE [m]
+- `saveat`: chainage locations at which to return mean depth [m]
             (default: `reach.obs.x`, aligning output with SWOT observations)
 
 # Returns
-Predicted WSE vector at `saveat` locations, or `nothing` if the solve fails.
+Predicted mean flow depth vector at `saveat` locations, or `nothing` if the solve fails.
+Use [`compute_wse`](@ref) to convert mean depth to WSE.
 """
-function gvf_solve(Q::Real, n::Real, r::Real, α::Real, z0::Real, H_bc::Real,
+function gvf_solve(Q::Real, n::Real, r::Real, z0::Real, H_bc::Real,
                    reach::SWOTReach;
                    saveat::Vector{Float64} = collect(reach.obs.x))
     x       = reach.x
@@ -92,7 +118,7 @@ function gvf_solve(Q::Real, n::Real, r::Real, α::Real, z0::Real, H_bc::Real,
     hbf_itp = reach.hbf
     z_itp   = reach.z
     y_bc    = max((H_bc - z0) * r / (r + 1), 0.01)
-    p       = (Q, n, r, α, S0_itp, wbf_itp, hbf_itp, z_itp, z0)
+    p       = (Q, n, r, S0_itp, wbf_itp, hbf_itp, z_itp, z0)
     prob    = ODEProblem(gvf_rhs, y_bc, (x[1], x[end]), p)
     sol     = try
         solve(prob, AutoTsit5(Rosenbrock23()),
@@ -102,6 +128,5 @@ function gvf_solve(Q::Real, n::Real, r::Real, α::Real, z0::Real, H_bc::Real,
         return nothing
     end
     sol.retcode == ReturnCode.Success || return nothing
-    z_saveat = z0 .+ z_itp.(saveat) .* α
-    sol.u .* ((r + 1) / r) .+ z_saveat
+    sol.u
 end
