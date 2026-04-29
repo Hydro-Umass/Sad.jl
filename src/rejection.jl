@@ -59,19 +59,19 @@ Draw samples from `priors` and reject those whose GVF-predicted WSE
 deviates from observations by more than `ε_rel` (mean relative RMSE
 across representative timesteps).
 
-Returns a (4 × N_accepted) matrix with rows [n, r, z0, α].
+Returns a (3 × N_accepted) matrix with rows [n, r, z0].
 Q is not included — it is handled per-timestep by q_ensemble.
 """
 function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
                           months::Vector{Int} = fill(1, reach.nt);
                           N::Int            = 500,
-                          ε_rel::Float64    = 0.5,
+                          ε_rel::Float64    = 0.1,
                           max_attempts::Int = 20_000,
                           n_bins::Int       = 5)
     rep_ts = select_representative_timesteps(reach; n_bins=n_bins)
     if isempty(rep_ts)
         @warn "No valid timesteps found for rejection sampling"
-        return Matrix{Float64}(undef, 4, 0)
+        return Matrix{Float64}(undef, 3, 0)
     end
 
     h_ds  = reach.H[1, reach.valid]
@@ -84,7 +84,7 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
          H_bc = reach.H[1, t])
     end
 
-    accepted = Matrix{Float64}(undef, 4, N)
+    accepted = Matrix{Float64}(undef, 3, N)
     n_acc    = 0
     n_try    = 0
 
@@ -94,7 +94,6 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
         n_draw = rand(priors.np)
         r_draw = rand(priors.rp)
         z0     = rand(priors.zp)
-        α      = rand(priors.ap)
 
         rmse_all = Float64[]
         failed   = false
@@ -102,13 +101,14 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
         for (obs, t) in zip(obs_per_t, rep_ts)
             Qp_t = monthly_q_prior(priors, months[t])
             Q_t  = rand(Qp_t)
-            pred = gvf_solve(Q_t, n_draw, r_draw, α, z0, obs.H_bc, reach;
+            pred = gvf_solve(Q_t, n_draw, r_draw, z0, obs.H_bc, reach;
                              saveat=obs.x)
             if isnothing(pred)
                 failed = true
                 break
             end
-            rmse = sqrt(mean((pred .- obs.H).^2))
+            z_saveat = z0 .+ reach.z.(obs.x)
+            rmse = sqrt(mean((compute_wse.(pred, z_saveat, r_draw) .- obs.H).^2))
             push!(rmse_all, rmse)
         end
 
@@ -116,7 +116,7 @@ function rejection_sample(priors::SWOTPriors, reach::SWOTReach,
         mean(rmse_all) / H_ref > ε_rel && continue
 
         n_acc += 1
-        accepted[:, n_acc] = [n_draw, r_draw, z0, α]
+        accepted[:, n_acc] = [n_draw, r_draw, z0]
     end
 
     rate = round(100 * n_acc / n_try, digits=1)
@@ -143,7 +143,7 @@ uniformly across [ppf(0.01), ppf(0.999)] to ensure the ensemble spans
 the full plausible range including extreme flood events.
 
 Returns (Q_accepted, member_idx) where member_idx indexes into
-reach_ensemble columns, preserving the (Q, n, r, z0, α) pairing.
+reach_ensemble columns, preserving the (Q, n, r, z0) pairing.
 Returns (Float64[], Int[]) if no Q values are accepted.
 """
 function q_ensemble(priors::SWOTPriors,
@@ -189,13 +189,14 @@ function q_ensemble(priors::SWOTPriors,
         haskey(accepted_Q, member) && continue
 
         Q_try = Q_lo + rand() * (Q_hi - Q_lo)
-        n_k, r_k, z0_k, α_k = reach_ensemble[:, member]
+        n_k, r_k, z0_k = reach_ensemble[:, member]
 
-        pred = gvf_solve(Q_try, n_k, r_k, α_k, z0_k, H_bc, reach;
+        pred = gvf_solve(Q_try, n_k, r_k, z0_k, H_bc, reach;
                          saveat=x_up)
         isnothing(pred) && continue
 
-        if abs(pred[1] - H_obs_up) < eps_use
+        z_saveat = z0_k .+ reach.z.(x_up)
+        if abs(compute_wse(pred[1], z_saveat[1], r_k) - H_obs_up) < eps_use
             accepted_Q[member] = Q_try
         end
     end
