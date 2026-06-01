@@ -69,7 +69,8 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         g = f.group["gbpriors"].group["reach"]
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
-        np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
+        # np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
+        np = Truncated(Normal(0.03, 0.01), 0.01, 0.05)
         # channel shape parameter
         r_m = exp(g["logr_hat"][i])
         r_s = exp(g["logr_sd"][i])
@@ -119,22 +120,23 @@ end
 
 Build a 12-element Vector{Distribution} of truncated LogNormals,
 one per calendar month. Each distribution is centred on the monthly
-ML mean with σ=2 in log-space (wide enough to cover uncertainty in
-the ML estimate), truncated to [q_l, q_u * 20].
+ML mean with σ=0.5 in log-space (wide enough to cover uncertainty in
+the ML estimate), truncated to [q_l, q_u * 10].
 """
 function _monthly_distributions(monthly_means::Vector,
                                  q_l::Real, q_u::Real,
                                  q_m_annual::Real)
     map(1:12) do mo
+        q_cv = 0.5
         qm_mo = Float64(monthly_means[mo])
-        logmu = log(qm_mo) - 1.0^2 / 2
+        logmu = log(qm_mo) - q_cv^2 / 2
         logmu = isinf(logmu) ? log(q_m_annual) : logmu
-        q_hi  = max(q_u, 20 * qm_mo)
+        q_hi  = max(q_u, 10 * qm_mo)
         q_lo  = max(q_l, 0.01)
         try
-            truncated(LogNormal(logmu, 2.0), q_lo, q_hi)
+            truncated(LogNormal(logmu, q_cv), q_lo, q_hi)
         catch
-            truncated(LogNormal(logmu, 2.0), 0.1 * qm_mo, 20 * qm_mo)
+            truncated(LogNormal(logmu, q_cv), 0.1 * qm_mo, 10 * qm_mo)
         end
     end
 end
@@ -145,12 +147,13 @@ end
 Build a single time-invariant truncated LogNormal discharge prior.
 """
 function _single_q_prior(q_m::Real, q_l::Real, q_u::Real)
-    qm = log(q_m) - 2.0^2 / 2
+    q_cv = 0.5
+    qm = log(q_m) - q_cv^2 / 2
     qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
     try
-        truncated(LogNormal(qm, 2.0), q_l, q_u)
+        truncated(LogNormal(qm, q_cv), q_l, q_u)
     catch
-        truncated(LogNormal(qm, 2.0), 0.1 * q_m, 20 * q_m)
+        truncated(LogNormal(qm, q_cv), 0.1 * q_m, 10 * q_m)
     end
 end
 
@@ -174,8 +177,9 @@ function priors(qwbm::Float64, hmin::Float64, class::River;
     rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
     q_cv = 1.0
     Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 10 * qwbm)
-    n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
-    np = Uniform(n_lo, 0.07)
+    # n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
+    # np = Uniform(n_lo, 0.07)
+    np = Truncated(Normal(0.03, 0.01), 0.01, 0.05)
     rp = Uniform(rbnds[Int(class)]...)
     zp = z0_prior(qwbm, hmin, reach)
     SWOTPriors(Qp, np, rp, zp)
