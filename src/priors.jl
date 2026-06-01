@@ -85,7 +85,7 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
             return missing
         end
         Qp = _build_q_prior(f, i, q_m, q_l, q_u)
-        # bed elevation — depth estimate scales with discharge magnitude
+        # bed elevation: depth estimate scales with discharge magnitude
         q_m_f     = Float64(q_m)
         depth_est = q_m_f > 500.0 ? 7.0 : (q_m_f > 100.0 ? 5.0 : 3.0)
         z0_est    = hmin - depth_est
@@ -131,10 +131,11 @@ function _monthly_distributions(monthly_means::Vector,
         logmu = isinf(logmu) ? log(q_m_annual) : logmu
         q_hi  = max(q_u, 20 * qm_mo)
         q_lo  = max(q_l, 0.01)
+        q_cv = 0.5
         try
-            truncated(LogNormal(logmu, 2.0), q_lo, q_hi)
+            truncated(LogNormal(logmu, q_cv), q_lo, q_hi)
         catch
-            truncated(LogNormal(logmu, 2.0), 0.1 * qm_mo, 20 * qm_mo)
+            truncated(LogNormal(logmu, q_cv), 0.1 * qm_mo, 20 * qm_mo)
         end
     end
 end
