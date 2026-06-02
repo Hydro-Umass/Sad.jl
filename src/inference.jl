@@ -44,7 +44,7 @@ function compute_A0(reach::SWOTReach, reach_ensemble::Matrix{Float64})
 end
 
 """
-    letkf(A, d, HA, R; xs, ys, ρ) -> Matrix{Float64}
+    letkf(A, d, HA, R; xs, ys, ρ, huber_threshold) -> Matrix{Float64}
 
 Local Ensemble Transform Kalman Filter.
 
@@ -53,19 +53,23 @@ Q is assimilated in log-space to enforce Q > 0 after the update and
 improve Gaussianity of the Q marginal distribution.
 
 # Arguments
-- `A`:   (ndim × nens) state ensemble — row 1 is log(Q)
-- `d`:   (nobs,) observation vector
-- `HA`:  (nobs × nens) model-predicted observation ensemble
-- `R`:   (nobs,) diagonal observation error variances
-- `xs`:  state index patches for localisation (default: global)
-- `ys`:  observation index patches for localisation (default: global)
-- `ρ`:   covariance inflation factor (default 1.05)
+- `A`:               (ndim × nens) state ensemble — row 1 is log(Q)
+- `d`:               (nobs,) observation vector
+- `HA`:              (nobs × nens) model-predicted observation ensemble
+- `R`:               (nobs,) diagonal observation error variances
+- `xs`:              state index patches for localisation (default: global)
+- `ys`:              observation index patches for localisation (default: global)
+- `ρ`:               covariance inflation factor (default 1.05)
+- `huber_threshold`: Huber κ; observations with |innovation|/σ_innov > κ have
+                     their R inflated by (|z|/κ)², downweighting outliers.
+                     Set to `Inf` to disable (default).
 """
 function letkf(A::Matrix{Float64}, d::Vector{Float64},
                HA::Matrix{Float64}, R::Vector{Float64};
                xs::Union{Nothing, Vector{Vector{Int}}} = nothing,
                ys::Union{Nothing, Vector{Vector{Int}}} = nothing,
-               ρ::Float64 = 1.05)
+               ρ::Float64  = 1.05,
+               huber_threshold::Float64 = Inf)
     ndim, nens = size(A)
     nobs       = length(d)
     Aa         = zeros(ndim, nens)
@@ -85,10 +89,23 @@ function letkf(A::Matrix{Float64}, d::Vector{Float64},
         Yl = Y[ly, :]
         Rl = R_mat[ly, ly]
 
+        innov = d[ly] .- mean(HA[ly, :], dims=2)[:]
+
+        # Huber robust update: inflate R for observations whose normalised
+        # innovation exceeds the threshold.  σ_innov combines ensemble spread
+        # (HPH^T diagonal) with the prior observation error (R diagonal) so
+        # the threshold is dimensionless and reach-independent.
+        if isfinite(huber_threshold)
+            σ_innov  = sqrt.(diag(Yl * Yl') ./ (nens - 1) .+ diag(Matrix(Rl)))
+            z        = abs.(innov) ./ σ_innov
+            factors  = max.(1.0, z ./ huber_threshold) .^ 2
+            Rl       = Diagonal(diag(Matrix(Rl)) .* factors)
+        end
+
         C  = Yl' * inv(Matrix(Rl))
         P  = inv((nens - 1) / ρ * I + C * Yl)
         W  = real(sqrt(Symmetric((nens - 1) * P)))
-        w  = P * C * (d[ly] .- mean(HA[ly, :], dims=2)[:])
+        w  = P * C * innov
         W  = W .+ reshape(w, :, 1)
 
         Aa[lx, :] = Xl * W .+ mean(A[lx, :], dims=2)
@@ -127,9 +144,10 @@ A `NamedTuple` with:
 """
 function infer(p::SWOTPriors, reach::SWOTReach;
                time_str::Vector{String} = String[],
-               N::Int        = 1000,
-               σₒ::Float64   = 0.5,
-               rho::Float64  = 1.05)
+               N::Int                   = 1000,
+               σₒ::Float64              = 0.5,
+               rho::Float64             = 1.05,
+               huber_threshold::Float64 = Inf)
     valid_ts = findall(reach.valid)
     if isempty(valid_ts)
         @warn "infer: no valid timesteps — returning empty posterior"
@@ -163,7 +181,8 @@ function infer(p::SWOTPriors, reach::SWOTReach;
 
     # Stage 2: dynamic discharge via LETKF
     result = infer_discharge(pa, reach;
-                             sigma_obs=σₒ, N=N, time_str=time_str, rho=rho)
+                             sigma_obs=σₒ, N=N, time_str=time_str, rho=rho,
+                             huber_threshold=huber_threshold)
     reach_ens = hcat(rand(pa.np, N), rand(pa.rp, N), rand(pa.zp, N))' |> Matrix
     return (reach_ensemble = reach_ens,
             Q_post         = result.Q_post,
@@ -272,7 +291,8 @@ function infer_discharge(p::SWOTPriors, reach::SWOTReach;
                          sigma_obs::Float64       = 0.5,
                          N::Int                   = 1000,
                          time_str::Vector{String} = String[],
-                         rho::Float64             = 1.05)
+                         rho::Float64             = 1.05,
+                         huber_threshold::Float64 = Inf)
     months = if !isempty(time_str) && p.Qp isa Vector
         map(time_str) do s
             try Month(DateTime(s)).value
@@ -328,7 +348,7 @@ function infer_discharge(p::SWOTPriors, reach::SWOTReach;
         HA_filt = HA[:, good_ens]
         sigma_node = fill(sigma_obs, length(d)-1)
         R_diag = sigma_node .^ 2
-        A_analysis = letkf(A_filt, d[2:end], HA_filt[2:end, :], R_diag; ρ=rho)
+        A_analysis = letkf(A_filt, d[2:end], HA_filt[2:end, :], R_diag; ρ=rho, huber_threshold=huber_threshold)
         Qp_t = monthly_q_prior(p, months[t])
         Q_lo = quantile(Qp_t, 0.001)
         Q_hi = quantile(Qp_t, 0.999)
