@@ -62,14 +62,14 @@ improve Gaussianity of the Q marginal distribution.
 - `ρ`:               covariance inflation factor (default 1.05)
 - `huber_threshold`: Huber κ; observations with |innovation|/σ_innov > κ have
                      their R inflated by (|z|/κ)², downweighting outliers.
-                     Set to `Inf` to disable (default).
+                     Set to `Inf` to disable (default: 2.0).
 """
 function letkf(A::Matrix{Float64}, d::Vector{Float64},
                HA::Matrix{Float64}, R::Vector{Float64};
                xs::Union{Nothing, Vector{Vector{Int}}} = nothing,
                ys::Union{Nothing, Vector{Vector{Int}}} = nothing,
                ρ::Float64  = 1.05,
-               huber_threshold::Float64 = Inf)
+               huber_threshold::Float64 = 2.0)
     ndim, nens = size(A)
     nobs       = length(d)
     Aa         = zeros(ndim, nens)
@@ -147,7 +147,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                N::Int                   = 1000,
                σₒ::Float64              = 0.5,
                rho::Float64             = 1.05,
-               huber_threshold::Float64 = Inf)
+               huber_threshold::Float64 = 2.0)
     valid_ts = findall(reach.valid)
     if isempty(valid_ts)
         @warn "infer: no valid timesteps — returning empty posterior"
@@ -292,7 +292,7 @@ function infer_discharge(p::SWOTPriors, reach::SWOTReach;
                          N::Int                   = 1000,
                          time_str::Vector{String} = String[],
                          rho::Float64             = 1.05,
-                         huber_threshold::Float64 = Inf)
+                         huber_threshold::Float64 = 2.0)
     months = if !isempty(time_str) && p.Qp isa Vector
         map(time_str) do s
             try Month(DateTime(s)).value

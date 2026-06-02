@@ -70,7 +70,7 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
         # np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
-        np = Truncated(Normal(0.03, 0.01), 0.01, 0.05)
+        np = truncated(Normal(0.03, 0.01), 0.01, 0.05)
         # channel shape parameter
         r_m = exp(g["logr_hat"][i])
         r_s = exp(g["logr_sd"][i])
@@ -179,7 +179,7 @@ function priors(qwbm::Float64, hmin::Float64, class::River;
     Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 10 * qwbm)
     # n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
     # np = Uniform(n_lo, 0.07)
-    np = Truncated(Normal(0.03, 0.01), 0.01, 0.05)
+    np = truncated(Normal(0.03, 0.01), 0.01, 0.05)
     rp = Uniform(rbnds[Int(class)]...)
     zp = z0_prior(qwbm, hmin, reach)
     SWOTPriors(Qp, np, rp, zp)
