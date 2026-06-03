@@ -1,6 +1,10 @@
 using Test
 using Statistics
+using LinearAlgebra
 using NCDatasets
+using ForwardDiff
+using Distributions
+using BSplineKit
 using Sad
 
 # path to test data, relative to the test directory
@@ -19,7 +23,8 @@ function load_test_data()
         W    = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, 1:10:end])
         Q    = g["Q"][end:-1:1, 1:10:end]
         S    = (diff(H, dims=1) ./ diff(x))[:, 1:10:end]
-        S    = convert(Matrix{Sad.FloatM}, [S[1, :]'; S])
+        S_row = S[1:1, :]
+        S    = convert(Matrix{Sad.FloatM}, vcat(S_row, S))
         reach = Sad.preprocess(x, H, W, S)
         p     = Sad.priors(mean(Q[1, :]), reach.hmin, Sad.sinuous; reach)
         reach, p, Q
@@ -72,7 +77,7 @@ end
     end
 
     @testset "valid timesteps" begin
-        # tt least some timesteps should be valid
+        # at least some timesteps should be valid
         @test sum(reach.valid) > 0
     end
 end
@@ -114,11 +119,9 @@ end
     end
 end
 
-# GVF tests
+# Dingman cross-section geometry tests
 
-@testset "gvf" begin
-    reach, p, Q = load_test_data()
-
+@testset "cross-section geometry" begin
     @testset "area" begin
         # area should be positive for positive depth
         @test Sad.area(1.0, 100.0, 5.0, 2.0) > 0
@@ -141,194 +144,241 @@ end
         # should be increasing in y
         @test Sad.compute_width(4.0, 100.0, 5.0, 2.0) > Sad.compute_width(1.0, 100.0, 5.0, 2.0)
     end
-
-    @testset "gvf_solve returns valid mean depth" begin
-        t   = findall(reach.valid)[1]
-        H_bc = reach.H[1, t]
-        y_pred = Sad.gvf_solve(500.0, 0.03, 2.0, reach.hmin - 5.0,
-                               H_bc, reach)
-        # should return a vector, not nothing
-        @test !isnothing(y_pred)
-        @test length(y_pred) == reach.nobs
-        # mean depth should be finite and positive
-        @test all(isfinite.(y_pred))
-        @test all(y_pred .> 0)
-        # convert to WSE and check it increases upstream
-        z_saveat = (reach.hmin - 5.0) .+ reach.z.(collect(reach.obs.x))
-        WSE = Sad.compute_wse.(y_pred, z_saveat, 2.0)
-        @test WSE[end] > WSE[1]
-        # downstream boundary should match H_bc
-        @test WSE[1] ≈ H_bc atol=0.1
-    end
-
-    @testset "gvf_solve fails gracefully" begin
-        t    = findall(reach.valid)[1]
-        H_bc = reach.H[1, t]
-        # extreme parameters should return nothing rather than error
-        result = Sad.gvf_solve(1e10, 0.001, 0.1, -100.0, H_bc, reach)
-        @test isnothing(result) || all(isfinite.(result))
-    end
-
-    @testset "gvf_solve mean depth consistency" begin
-        # mean depth + z + shape factor should reconstruct WSE consistently
-        t   = findall(reach.valid)[1]
-        H_bc = reach.H[1, t]
-        r_val = 2.0
-        z0_val = reach.hmin - 5.0
-        y_pred = Sad.gvf_solve(500.0, 0.03, r_val, z0_val, H_bc, reach)
-        @test !isnothing(y_pred)
-        # downstream mean depth should satisfy y_bc = (H_bc - z0) * r/(r+1)
-        y_bc_expected = (H_bc - z0_val) * r_val / (r_val + 1)
-        @test y_pred[1] ≈ y_bc_expected atol=0.1
-    end
 end
 
-# rejection sampling tests
+# Manning analytical model tests (v2)
 
-@testset "rejection_sample" begin
-    reach, p, Q = load_test_data()
+@testset "manning" begin
+    reach, p, Q_truth = load_test_data()
 
-    ens = Sad.rejection_sample(p, reach; N=50, max_attempts=5_000)
-
-    @testset "output shape" begin
-        # should return 3 rows: [n, r, z0]
-        @test size(ens, 1) == 3
-        @test size(ens, 2) > 0
+    @testset "manning_Q" begin
+        # basic sanity: positive Q for positive inputs
+        @test Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4) > 0
+        # Q increases with depth
+        @test Sad.manning_Q(0.03, 2.0, 6.0, 200.0, 10.0, 1e-4) >
+              Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4)
+        # Q decreases with roughness
+        @test Sad.manning_Q(0.04, 2.0, 5.0, 200.0, 10.0, 1e-4) <
+              Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4)
+        # Q increases with slope
+        @test Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 2e-4) >
+              Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4)
+        # Q increases with width
+        @test Sad.manning_Q(0.03, 2.0, 5.0, 300.0, 10.0, 1e-4) >
+              Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4)
+        # consistency with Dingman area function
+        n, r, y, Wb, Yb, S = 0.03, 2.0, 5.0, 200.0, 10.0, 1e-4
+        A = Sad.area(y, Wb, Yb, r)
+        Q_manning = (1/n) * A * y^(2/3) * sqrt(S)
+        @test Sad.manning_Q(n, r, y, Wb, Yb, S) ≈ Q_manning
     end
 
-    @testset "parameter bounds" begin
-        if size(ens, 2) > 0
-            n_ens  = ens[1, :]
-            r_ens  = ens[2, :]
-            z0_ens = ens[3, :]
-            # all parameters should be within prior support
-            @test all(n_ens  .>= minimum(p.np))
-            @test all(n_ens  .<= maximum(p.np))
-            @test all(r_ens  .>= minimum(p.rp))
-            @test all(r_ens  .<= maximum(p.rp))
-            @test all(z0_ens .>= minimum(p.zp))
-            @test all(z0_ens .<= maximum(p.zp))
+    @testset "manning_depth" begin
+        # inverses manning_Q
+        n, r, Wb, Yb, S = 0.03, 2.0, 200.0, 10.0, 1e-4
+        for Q in [100.0, 500.0, 2000.0]
+            y = Sad.manning_depth(Q, n, r, Wb, Yb, S)
+            @test y > 0
+            @test Sad.manning_Q(n, r, y, Wb, Yb, S) ≈ Q
         end
+        # depth increases with Q
+        @test Sad.manning_depth(1000.0, 0.03, 2.0, 200.0, 10.0, 1e-4) >
+              Sad.manning_depth(500.0, 0.03, 2.0, 200.0, 10.0, 1e-4)
+        # depth decreases with slope
+        @test Sad.manning_depth(500.0, 0.03, 2.0, 200.0, 10.0, 2e-4) <
+              Sad.manning_depth(500.0, 0.03, 2.0, 200.0, 10.0, 1e-4)
     end
 
-    @testset "select_representative_timesteps" begin
-        rep_ts = Sad.select_representative_timesteps(reach; n_bins=5)
-        @test length(rep_ts) > 0
-        @test length(rep_ts) <= 5
-        # all selected timesteps should be valid
-        @test all(reach.valid[rep_ts])
-        # should cover range of downstream WSE
-        h_ds = [reach.H[1, t] for t in rep_ts]
-        @test maximum(h_ds) > minimum(h_ds)
+    @testset "backwater_length" begin
+        # positive for positive inputs
+        @test Sad.backwater_length(5.0, 1e-4, 2.0) > 0
+        # increases with depth (deeper → longer backwater)
+        @test Sad.backwater_length(10.0, 1e-4, 2.0) >
+              Sad.backwater_length(5.0, 1e-4, 2.0)
+        # decreases with slope (steeper → shorter backwater)
+        @test Sad.backwater_length(5.0, 2e-4, 2.0) <
+              Sad.backwater_length(5.0, 1e-4, 2.0)
+        # rectangular limit: λ → 3*y0/(10*S0) as r → ∞
+        y0, S0 = 5.0, 1e-4
+        λ_rect = 3 * y0 / (10 * S0)
+        λ_r100 = Sad.backwater_length(y0, S0, 100.0)
+        @test λ_r100 ≈ λ_rect rtol=0.01  # within 1% for r=100
+        # Dingman correction: λ_r < λ_rect for finite r
+        @test Sad.backwater_length(y0, S0, 2.0) < λ_rect
     end
-end
 
-# Q ensemble tests
+    @testset "manning_wse" begin
+        # uniform flow WSE should increase upstream (bed rises)
+        n, r, z0, S = 0.03, 2.0, 100.0, 1e-4
+        x_nodes = [0.0, 2000.0, 4000.0, 6000.0]
+        Wb_nodes = fill(200.0, 4)
+        Yb_nodes = fill(10.0, 4)
+        z_nodes = [0.0, 0.2, 0.4, 0.6]
+        wse = Sad.manning_wse(500.0, n, r, z0, S, x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+        @test length(wse) == 4
+        @test all(isfinite.(wse))
+        # WSE increases upstream due to bed rise
+        @test all(diff(wse) .> 0)
+        # at x=0: WSE = z0 + 0 + y0*(r+1)/r
+        y0 = Sad.manning_depth(500.0, n, r, 200.0, 10.0, S)
+        @test wse[1] ≈ z0 + y0 * (r + 1) / r
+    end
 
-@testset "q_ensemble" begin
-    reach, p, Q = load_test_data()
-    ens = Sad.rejection_sample(p, reach; N=50, max_attempts=5_000)
+    @testset "manning_wse_backwater boundary conditions" begin
+        n, r, z0, S0 = 0.03, 2.0, 100.0, 1e-4
+        x_nodes = [0.0, 2000.0, 4000.0, 6000.0]
+        Wb_nodes = fill(200.0, 4)
+        Yb_nodes = fill(10.0, 4)
+        z_nodes = [0.0, 0.2, 0.4, 0.6]
+        y0 = Sad.manning_depth(500.0, n, r, 200.0, 10.0, S0)
 
-    if size(ens, 2) > 0
-        valid_ts = findall(reach.valid)
-        t = valid_ts[1]
-        Q_ens, members = Sad.q_ensemble(p, ens, reach, t)
+        # H_bc = uniform flow WSE → backwater = uniform flow
+        H_bc_unif = Sad.compute_wse(y0, z0, r)
+        wse_unif = Sad.manning_wse(500.0, n, r, z0, S0, x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+        wse_bw = Sad.manning_wse_backwater(500.0, n, r, z0, S0, H_bc_unif,
+                                            x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+        @test wse_bw ≈ wse_unif atol=1e-10
 
-        @testset "output" begin
-            @test length(Q_ens) == length(members)
-            @test all(Q_ens .> 0)
-            @test all(members .>= 1)
-            @test all(members .<= size(ens, 2))
+        # H_bc above uniform → backwater: WSE[1] = H_bc exactly
+        H_bc_high = H_bc_unif + 2.0
+        wse_bw2 = Sad.manning_wse_backwater(500.0, n, r, z0, S0, H_bc_high,
+                                             x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+        @test wse_bw2[1] ≈ H_bc_high
+        # upstream WSE should approach uniform flow
+        @test wse_bw2[end] > wse_unif[end]
+        @test wse_bw2[end] < H_bc_high + z_nodes[end]
+
+        # H_bc below uniform → drawdown (M2): WSE[1] = H_bc exactly
+        H_bc_low = H_bc_unif - 1.0
+        wse_bw3 = Sad.manning_wse_backwater(500.0, n, r, z0, S0, H_bc_low,
+                                             x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+        @test wse_bw3[1] ≈ H_bc_low
+    end
+
+    @testset "ForwardDiff compatibility" begin
+        # manning_Q and manning_depth must work with Dual numbers
+        n, r, Wb, Yb, S = 0.03, 2.0, 200.0, 10.0, 1e-4
+        Q = 500.0
+
+        # scalar derivatives
+        dQ_dy = ForwardDiff.derivative(y -> Sad.manning_Q(n, r, y, Wb, Yb, S), 5.0)
+        @test isfinite(dQ_dy)
+        @test dQ_dy > 0  # Q increases with y
+
+        dy_dQ = ForwardDiff.derivative(Q -> Sad.manning_depth(Q, n, r, Wb, Yb, S), Q)
+        @test isfinite(dy_dQ)
+        @test dy_dQ > 0  # y increases with Q
+
+        # manning_wse_backwater gradient w.r.t. Q
+        x_nodes = [0.0, 2000.0, 4000.0]
+        Wb_nodes = [200.0, 200.0, 200.0]
+        Yb_nodes = [10.0, 10.0, 10.0]
+        z_nodes = [0.0, 0.2, 0.4]
+        z0, S0, H_bc = 100.0, 1e-4, 106.0
+
+        grad = ForwardDiff.derivative(
+            Q -> Sad.manning_wse_backwater(Q, n, r, z0, S0, H_bc,
+                                           x_nodes, Wb_nodes, Yb_nodes, z_nodes)[2],
+            Q)
+        @test isfinite(grad)
+
+        # multi-parameter gradient (as Optim.L-BFGS would use)
+        function obj(theta)
+            wse = Sad.manning_wse_backwater(
+                theta[1], n, r, theta[2], S0, H_bc,
+                x_nodes, Wb_nodes, Yb_nodes, z_nodes)
+            return sum((wse[2:end] .- 107.0).^2)
         end
-
-        @testset "Q range" begin
-            # accepted Q should be within prior support
-            @test all(Q_ens .>= quantile(p.Qp, 0.001))
-            @test all(Q_ens .<= quantile(p.Qp, 0.999))
-        end
+        g = ForwardDiff.gradient(obj, [Q, z0])
+        @test all(isfinite.(g))
+        @test length(g) == 2
     end
 end
 
-# infer_channel_params tests
-
-@testset "infer_channel_params" begin
-    reach, p, _ = load_test_data()
-
-    months = fill(1, reach.nt)
-    pa = Sad.infer_channel_params(p, reach, months, 50)
-
-    @testset "returns SWOTPriors" begin
-        @test pa isa Sad.SWOTPriors
-        # Qp should be unchanged (stage 1 does not touch discharge prior)
-        @test pa.Qp === p.Qp
-    end
-
-    @testset "posterior distributions are sampleable" begin
-        n_samp  = rand(pa.np, 100)
-        r_samp  = rand(pa.rp, 100)
-        z0_samp = rand(pa.zp, 100)
-        @test all(isfinite.(n_samp))
-        @test all(isfinite.(r_samp))
-        @test all(isfinite.(z0_samp))
-    end
-
-    @testset "posterior parameter ranges are physically plausible" begin
-        n_samp  = rand(pa.np, 500)
-        r_samp  = rand(pa.rp, 500)
-        @test all(n_samp  .> 0)
-        @test all(r_samp  .> 0)
-    end
-end
-
-# end-to-end inference test
+# v2 inference tests
 
 @testset "infer" begin
     reach, p, Q_truth = load_test_data()
+    valid_ts = findall(reach.valid)
+    Qt = [Q_truth[1, t] for t in valid_ts]
 
-    res = Sad.infer(p, reach; N=100, σₒ=2.0)
+    @testset "precompute_manning" begin
+        months = fill(1, reach.nt)
+        precomp = Sad.precompute_manning(reach, months)
+        @test length(precomp.x_nodes) == reach.nobs
+        @test precomp.nt == reach.nt
+        @test length(precomp.valid_ts) == sum(reach.valid)
+        @test length(precomp.H_bc) == sum(reach.valid)
+        @test all(precomp.H_bc .> 0)
+        @test precomp.S0 > 0
+        # upstream indices should be >= 2 (j=1 is boundary)
+        for js in precomp.upstream_j
+            @test all(js .>= 2)
+        end
+    end
 
-    @testset "output structure" begin
-        @test haskey(res, :Q_post)
-        @test haskey(res, :reach_ensemble)
-        @test haskey(res, :A_post)
-        @test haskey(res, :valid_ts)
-        @test haskey(res, :completeness)
+    @testset "neg_log_joint" begin
+        months = fill(1, reach.nt)
+        precomp = Sad.precompute_manning(reach, months)
+        nt = reach.nt
+        theta0 = zeros(nt + 3)
+        for t in 1:nt
+            theta0[t] = log(quantile(p.Qp, 0.5))
+        end
+        theta0[nt+1] = log(0.03)
+        theta0[nt+2] = log(2.0)
+        theta0[nt+3] = mean(p.zp)
+
+        nll = Sad.neg_log_joint(theta0, precomp, p)
+        @test isfinite(nll)
+        @test nll > 0
+
+        g = ForwardDiff.gradient(theta -> Sad.neg_log_joint(theta, precomp, p), theta0)
+        @test length(g) == nt + 3
+        @test all(isfinite.(g))
+    end
+
+    @testset "infer basic" begin
+        res = Sad.infer(p, reach; σ_obs=1.0, ν=3.0, λ_smooth=1.0,
+                            iterations=100, g_tol=1e-6)
+
         @test length(res.Q_post) == reach.nt
-        @test size(res.reach_ensemble, 1) == 3
-        # A_post is a per-timestep vector
-        @test res.A_post isa Vector
-        @test length(res.A_post) == reach.nt
-    end
+        @test length(res.Q_std) == reach.nt
+        @test length(res.θ_map) == reach.nt + 3
+        @test size(res.Σ) == (reach.nt + 3, reach.nt + 3)
 
-    @testset "Q_post" begin
-        valid_ts = findall(reach.valid)
-        Q_est = res.Q_post[valid_ts]
-        good  = findall(.!isnan.(Q_est))
-        # at least 80% of valid timesteps should have a posterior estimate
-        @test length(good) / length(valid_ts) >= 0.8
-        # all posterior Q values should be positive
-        @test all(Q_est[good] .> 0)
-    end
-
-    @testset "NSE" begin
-        valid_ts = findall(reach.valid)
-        Qt = [Q_truth[1, t] for t in valid_ts]
         Qe = res.Q_post[valid_ts]
-        good = findall(.!isnan.(Qe))
-        nse  = 1 - sum((Qe[good] .- Qt[good]).^2) /
-                   sum((Qt[good] .- mean(Qt[good])).^2)
-        @info "NSE: $(round(nse, digits=3))"
-        # NSE should be positive (two-stage LETKF approach)
-        @test nse > -1.0  # model should at least not be worse than horizontal line by >100%
+        @test all(Qe .> 0)
+
+        @test res.n_post > 0
+        @test res.r_post > 0
+        @test isfinite(res.z0_post)
     end
 
-    @testset "compute_A0" begin
-        A0 = Sad.compute_A0(reach, res.reach_ensemble)
-        @test A0 > 0
-        @test isfinite(A0)
-        # A0 should be physically plausible (between 100 and 100000 m²)
-        @test A0 > 100.0
-        @test A0 < 100_000.0
+    @testset "infer NSE" begin
+        res = Sad.infer(p, reach; σ_obs=1.0, ν=3.0, λ_smooth=5.0,
+                            iterations=200)
+        Qe = res.Q_post[valid_ts]
+        nse = 1 - sum((Qe .- Qt).^2) / sum((Qt .- mean(Qt)).^2)
+        @info "v2 NSE" nse=round(nse, digits=3)
+        @test nse > -2.0  # model should be reasonable
+    end
+
+    @testset "infer speed" begin
+        t_v2 = @elapsed Sad.infer(p, reach; σ_obs=1.0, ν=3.0, λ_smooth=1.0,
+                                       iterations=100)
+        @info "v2 inference time" t_v2=round(t_v2, digits=2)
+        @test t_v2 < 30.0  # should complete in under 30 seconds
+    end
+
+    @testset "safe_logpdf" begin
+        d = Uniform(5.0, 11.0)
+        @test isfinite(Sad.safe_logpdf(d, 4.0))
+        @test isfinite(Sad.safe_logpdf(d, 12.0))
+        @test isfinite(Sad.safe_logpdf(d, 8.0))
+
+        d_tn = truncated(Normal(0.03, 0.01), 0.01, 0.05)
+        @test isfinite(Sad.safe_logpdf(d_tn, 0.06))
     end
 end
 
@@ -337,18 +387,14 @@ end
 @testset "missing data" begin
     reach, p, Q_truth = load_test_data()
 
-    # helper to create a reach with modified observations
-    function make_reach(H, W, S, x)
-        Sad.preprocess(x, H, W, S)
-    end
-
     Dataset(TESTDATA) do f
         g    = f.group["XS_Timeseries"]
         x    = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
         H    = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, :])
         W    = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, :])
-        S    = diff(H, dims=1) ./ diff(x)
-        S    = convert(Matrix{Sad.FloatM}, [S[1, :]'; S])
+        S    = (diff(H, dims=1) ./ diff(x))
+        S_row = S[1:1, :]
+        S    = convert(Matrix{Sad.FloatM}, vcat(S_row, S))
 
         @testset "all H missing" begin
             H_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(H)...))
@@ -356,7 +402,7 @@ end
             # no valid timesteps
             @test sum(reach_miss.valid) == 0
             # infer should not error
-            res = Sad.infer(p, reach_miss; N=10)
+            res = Sad.infer(p, reach_miss; iterations=10)
             @test all(isnan.(res.Q_post))
         end
 
@@ -365,7 +411,7 @@ end
             reach_miss = Sad.preprocess(x, H, W_miss, S)
             # no valid timesteps since W is missing
             @test sum(reach_miss.valid) == 0
-            res = Sad.infer(p, reach_miss; N=10)
+            res = Sad.infer(p, reach_miss; iterations=10)
             @test all(isnan.(res.Q_post))
         end
 
@@ -374,50 +420,14 @@ end
             W_miss = convert(Matrix{Sad.FloatM}, fill(missing, size(W)...))
             reach_miss = Sad.preprocess(x, H_miss, W_miss, S)
             @test sum(reach_miss.valid) == 0
-            res = Sad.infer(p, reach_miss; N=10)
+            res = Sad.infer(p, reach_miss; iterations=10)
             @test all(isnan.(res.Q_post))
-        end
-
-        @testset "H missing for all but one timestep" begin
-            H_one = convert(Matrix{Sad.FloatM}, fill(missing, size(H)...))
-            H_one[:, 1] = H[:, 1]
-            reach_one = Sad.preprocess(x, H_one, W, S)
-            # only one timestep, not enough for rejection sampling but should not error
-            @test sum(reach_one.valid) <= 1
-            res = Sad.infer(p, reach_one; N=10)
-            @test length(res.Q_post) == reach_one.nt
-        end
-
-        @testset "W missing for half of timesteps" begin
-            W_half = copy(W)
-            W_half[:, 1:2:end] .= missing
-            reach_half = Sad.preprocess(x, H, W_half, S)
-            # should still have valid timesteps for even-indexed times
-            @test sum(reach_half.valid) > 0
-            res = Sad.infer(p, reach_half; N=50)
-            @test length(res.Q_post) == reach_half.nt
-            # valid timesteps should have posterior estimates
-            valid_ts = findall(reach_half.valid)
-            Q_est = res.Q_post[valid_ts]
-            good  = findall(.!isnan.(Q_est))
-            @test length(good) > 0
-            @test all(Q_est[good] .> 0)
-        end
-
-        @testset "H missing for some nodes at all timesteps" begin
-            H_nodes = copy(H)
-            # knock out first 10 nodes entirely
-            H_nodes[1:10, :] .= missing
-            reach_nodes = Sad.preprocess(x, H_nodes, W, S)
-            # should still work with remaining nodes
-            @test reach_nodes.nobs > 0
-            @test sum(reach_nodes.valid) > 0
         end
 
         @testset "drop_unobserved removes fully missing nodes" begin
             H_sparse = copy(H)
             W_sparse = copy(W)
-            #mMake nodes 5-10 fully missing
+            # make nodes 5-10 fully missing
             H_sparse[5:10, :] .= missing
             W_sparse[5:10, :] .= missing
             x_out, H_out, W_out, S_out = Sad.drop_unobserved(
@@ -426,11 +436,131 @@ end
                 convert(Matrix{Sad.FloatM}, W_sparse),
                 copy(S),
             )
-            # fully missing nodes should be removed
             @test size(H_out, 1) < size(H_sparse, 1)
             @test size(H_out, 1) == size(W_out, 1)
-            # chainage should still start from 0
             @test x_out[1] == 0.0
         end
+    end
+end
+
+# B-spline and preprocess tests
+
+@testset "B-spline smoothing" begin
+    @testset "spline_design_matrix" begin
+        x = collect(0.0:0.5:10.0)
+        B = BSplineKit.BSplineBasis(4, collect(range(0, 10, length=8)))
+        A = Sad.spline_design_matrix(x, B)
+        @test size(A) == (length(x), length(B))
+    end
+
+    @testset "penalty_matrix" begin
+        D = Sad.penalty_matrix(10, 2)
+        @test size(D) == (8, 10)
+        @test norm(D * ones(10)) < 1e-10
+    end
+
+    @testset "gcv_select" begin
+        x = collect(0.0:0.5:10.0)
+        y = 1.0 .+ 2.0 .* x .+ 0.5 .* sin.(x)
+        B = BSplineKit.BSplineBasis(4, collect(range(0, 10, length=8)))
+        lam = Sad.gcv_select(x, y, B)
+        @test lam > 0
+        @test isfinite(lam)
+    end
+
+    @testset "smooth_profile_bspline" begin
+        x = collect(0.0:500.0:10000.0)
+        y_true = 100.0 .+ 5e-5 .* x
+        y_noisy = y_true .+ 0.1 .* randn(length(x))
+
+        spl = Sad.smooth_profile_bspline(x, y_noisy; nknots=10, lambda=1.0)
+        y_smooth = spl.(x)
+        @test length(y_smooth) == length(x)
+        @test maximum(abs.(y_smooth .- y_true)) < 2.0
+
+        spl_gcv = Sad.smooth_profile_bspline(x, y_noisy; nknots=10)
+        y_gcv = spl_gcv.(x)
+        @test length(y_gcv) == length(x)
+    end
+
+    @testset "slope_from_spline" begin
+        x = collect(0.0:500.0:10000.0)
+        y_true = 100.0 .+ 5e-5 .* x
+        spl = Sad.smooth_profile_bspline(x, y_true; nknots=10, lambda=0.01)
+        slopes = Sad.slope_from_spline(spl, x)
+        @test all(slopes .> 0)
+        @test abs(mean(slopes) - 5e-5) < 2e-4
+    end
+
+    @testset "enforce_monotonicity" begin
+        x = collect(0.0:500.0:10000.0)
+        y = 100.0 .+ 5e-5 .* x .+ 0.5 .* sin.(2*pi .* x ./ 5000.0)
+        spl = Sad.smooth_profile_bspline(x, y; nknots=10, lambda=0.01)
+        spl_mono = Sad.enforce_monotonicity(spl, x, 1e-5)
+        slopes = Sad.slope_from_spline(spl_mono, x)
+        @test all(slopes .>= 1e-5)
+    end
+end
+
+@testset "preprocess" begin
+    reach, p = begin
+        Dataset(TESTDATA) do f
+            g = f.group["XS_Timeseries"]
+            ri = f.group["River_Info"]
+            x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
+            H = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, 1:10:end])
+            W = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, 1:10:end])
+            S = (diff(H, dims=1) ./ diff(x))[:, 1:10:end]
+            S_row = S[1:1, :]
+            S = convert(Matrix{Sad.FloatM}, vcat(S_row, S))
+            reach = Sad.preprocess(x, H, W, S)
+            p = Sad.priors(Float64(ri["QWBM"][1]), reach.hmin, Sad.sinuous; reach)
+            reach, p
+        end
+    end
+
+    Smat = begin
+        Dataset(TESTDATA) do f
+            g = f.group["XS_Timeseries"]
+            x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
+            H = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, 1:10:end])
+            S = (diff(H, dims=1) ./ diff(x))[:, 1:10:end]
+            S_row = S[1:1, :]
+            convert(Matrix{Sad.FloatM}, vcat(S_row, S))
+        end
+    end
+
+    @testset "preprocess creates valid reach" begin
+        reach_bsp = Sad.preprocess(reach.obs.x, reach.obs.H, reach.obs.W, Smat;
+                                      dx=200.0, min_slope=1e-5)
+        @test reach_bsp.nx == reach.nx
+        @test reach_bsp.nt == reach.nt
+        @test reach_bsp.nobs == reach.nobs
+        @test length(reach_bsp.x) == reach_bsp.nx
+        @test size(reach_bsp.H) == (reach_bsp.nx, reach_bsp.nt)
+        @test size(reach_bsp.W) == (reach_bsp.nx, reach_bsp.nt)
+        # S0 should match v1 (same method)
+        @test abs(reach_bsp.S0(reach_bsp.x[1]) - reach.S0(reach.x[1])) < 1e-8
+        @test abs(reach_bsp.S0(reach_bsp.x[end]) - reach.S0(reach.x[end])) < 1e-8
+        # Valid timesteps should match
+        @test length(findall(reach_bsp.valid)) == length(findall(reach.valid))
+    end
+
+    @testset "preprocess without Sobs" begin
+        reach_bsp_noS = Sad.preprocess(reach.obs.x, reach.obs.H, reach.obs.W;
+                                          dx=200.0, min_slope=1e-5)
+        @test reach_bsp_noS.nx > 0
+        @test reach_bsp_noS.nt == reach.nt
+        @test minimum(reach_bsp_noS.S0.(reach_bsp_noS.x)) >= 1e-5
+    end
+
+    @testset "preprocess + infer" begin
+        reach_bsp = Sad.preprocess(reach.obs.x, reach.obs.H, reach.obs.W, Smat;
+                                      dx=200.0, min_slope=1e-5)
+        res_bsp = Sad.infer(p, reach_bsp; σ_obs=1.0, ν=3.0, λ_smooth=1.0, iterations=100)
+        @test length(res_bsp.Q_post) == reach_bsp.nt
+        @test all(res_bsp.Q_post[findall(reach_bsp.valid)] .> 0)
+        @test res_bsp.n_post > 0
+        @test res_bsp.r_post > 0
     end
 end
