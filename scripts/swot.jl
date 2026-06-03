@@ -1,10 +1,10 @@
-### Run SAD algorithm with SWOT data
+### Run SAD v2 algorithm with SWOT data
 
 using Sad
-using DelimitedFiles
-using Distributions
 using LinearAlgebra
 using NCDatasets
+using Statistics
+using Optim
 
 const FILL = -999999999999
 
@@ -52,7 +52,7 @@ Retrieve information about river reach cross sections.
 # Arguments
 
 - `id`: reach ID
-= `swordfile`: SWORD NetCDF file
+- `swordfile`: SWORD NetCDF file
 
 """
 function river_info(id::Int, swordfile::String)
@@ -73,70 +73,140 @@ function river_info(id::Int, swordfile::String)
 end
 
 """
-    write_output(reachid, valid, outdir, A0, n, Qa, Qu)
+    write_output(reachid, valid, outdir, res, nt, W, time_str)
 
-Write SAD output to NetCDF.
+Write SAD v2 output to NetCDF.
 
+Saves MAP parameter estimates (Q, n, r, z₀) and Laplace uncertainty (Q_std).
+
+# Arguments
+
+- `reachid`:  SWORD reach ID
+- `valid`:    whether inference succeeded (1 = valid, 0 = invalid)
+- `outdir`:   output directory
+- `res`:      result NamedTuple from `infer` (or `nothing` if invalid)
+- `nt`:       number of timesteps
+- `W`:        width observations (nodes × timesteps)
+- `time_str`: timestamp strings for each timestep
 """
-function write_output(reachid, valid, outdir, A0, n, Qa, Qu, W, time_str)
+function write_output(reachid, valid, outdir, res, nt, W, time_str)
     outfile = joinpath(outdir, "$(reachid)_sad.nc")
     out = Dataset(outfile, "c")
-    out.attrib["valid"] = valid   # FIXME Determine what is considered valid in the context of a SAD run
+    out.attrib["sad_version"] = "v2"
+    out.attrib["valid"] = valid
     defDim(out, "nx", size(W, 1))
     defDim(out, "nt", size(W, 2))
     ridv = defVar(out, "reach_id", Int64, (), fillvalue = FILL)
     ridv[:] = reachid
-    A0v = defVar(out, "A0", Float64, (), fillvalue = FILL)
-    A0v[:] = A0
-    nv = defVar(out, "n", Float64, (), fillvalue = FILL)
-    nv[:] = n
-    Qav = defVar(out, "Qa", Float64, ("nt",), fillvalue = FILL)
-    Qav[:] = replace!(Qa, NaN=>FILL)
-    Quv = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
-    Quv[:] = Qu
-    time_str_var = defVar(out,"time_str", String, ("nt",), fillvalue = "no_data")
+
+    if valid == 1 && !isnothing(res)
+        # MAP channel parameters
+        nv = defVar(out, "n", Float64, (), fillvalue = FILL)
+        nv[:] = res.n_post
+        rv = defVar(out, "r", Float64, (), fillvalue = FILL)
+        rv[:] = res.r_post
+        z0v = defVar(out, "z0", Float64, (), fillvalue = FILL)
+        z0v[:] = res.z0_post
+
+        # Discharge: posterior mean and uncertainty
+        Qa = defVar(out, "Qa", Float64, ("nt",), fillvalue = FILL)
+        Qa[:] = replace(res.Q_post, NaN => FILL)
+        Qu = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
+        Qu[:] = replace(res.Q_std, NaN => FILL)
+
+        # Convergence info
+        if !isnothing(res.result)
+            out.attrib["converged"] = string(res.result.stopped_by.g_converged)
+            out.attrib["iterations"] = res.result.iterations
+            out.attrib["nll_minimum"] = Float64(Optim.minimum(res.result))
+        end
+    else
+        nv = defVar(out, "n", Float64, (), fillvalue = FILL)
+        nv[:] = FILL
+        rv = defVar(out, "r", Float64, (), fillvalue = FILL)
+        rv[:] = FILL
+        z0v = defVar(out, "z0", Float64, (), fillvalue = FILL)
+        z0v[:] = FILL
+        Qa = defVar(out, "Qa", Float64, ("nt",), fillvalue = FILL)
+        Qa[:] = fill(FILL, nt)
+        Qu = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
+        Qu[:] = fill(FILL, nt)
+    end
+
+    time_str_var = defVar(out, "time_str", String, ("nt",), fillvalue = "no_data")
     time_str_var[:] = time_str
     close(out)
 end
 
 """
-    main()
+    main(reachid, swordfile, sosfile, swotfile, outdir; kwargs...)
 
-Main driver routine.
+Main driver routine for SAD v2 discharge estimation.
 
+# Arguments
+
+- `reachid`:   SWORD reach ID
+- `swordfile`: path to SWORD NetCDF database
+- `sosfile`:   path to SoS NetCDF prior database
+- `swotfile`:  path to SWOT observation NetCDF
+- `outdir`:    output directory
+
+# Keyword arguments
+
+- `σ_obs`:       observation error scale [m] (default 0.1)
+- `ν`:           Student-t d.f.; `Inf` = Gaussian (default `Inf`)
+- `λ_smooth`:    temporal smoothness weight (default 1.0)
+- `iterations`:  max L-BFGS iterations (default 500)
+- `g_tol`:       gradient convergence tolerance (default 1e-6)
 """
-function main(reachid, swordfile, sosfile, swotfile, outdir)
+function main(reachid, swordfile, sosfile, swotfile, outdir;
+              σ_obs::Float64     = NaN,
+              ν::Float64         = 5.0,
+              λ_smooth::Float64  = 0.1,
+              iterations::Int    = 500,
+              g_tol::Float64     = 1e-6)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
 
+    if all(ismissing, H) || all(ismissing, W) || all(ismissing, S)
+        println("$(reachid): INVALID — no observations")
+        write_output(reachid, 0, outdir, nothing, size(W, 2), W, time_str)
+        return
+    end
+
     reach = Sad.preprocess(x, H, W, S)
 
-    A0 = missing
-    n = missing
-    Qa = Matrix{Sad.FloatM}(missing, 1, size(W, 2))
-    Qu = Matrix{Sad.FloatM}(missing, 1, size(W, 2))
-    if all(ismissing, H) || all(ismissing, W) || all(ismissing, S)
-        println("$(reachid): INVALID")
-        write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
-    else
-        p = Sad.priors(sosfile, reach.hmin, reachid)
-        if ismissing(p)
-            println("$(reachid): INVALID, missing mean discharge")
-            write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
-        else
-            try
-                res = Sad.infer(p, reach, time_str=time_str)
-                A0  = Sad.compute_A0(reach, res.reach_ensemble)
-                n   = mean(res.reach_ensemble[1, :])
-                Qa[1, :]  = [isnan(q) ? missing : q for q in res.Q_post]
-                Qu[1, :] = [isnothing(res.A_post[t]) ? missing : std(res.A_post[t][1, :]) for t in 1:reach.nt]
-                println("$(reachid): VALID")
-                write_output(reachid, 1, outdir, A0, n, Qa, Qu, W, time_str)
-            catch
-                println("$(reachid): INVALID")
-                write_output(reachid, 0, outdir, A0, n, Qa, Qu, W, time_str)
-            end
-        end
+    p = Sad.priors(sosfile, reach.hmin, reachid; S0=mean(reach.S0.(reach.x)))
+    if ismissing(p)
+        println("$(reachid): INVALID — missing mean discharge prior")
+        write_output(reachid, 0, outdir, nothing, reach.nt, W, time_str)
+        return
+    end
+
+    try
+        res = Sad.infer(p, reach;
+                            time_str  = time_str,
+                            σ_obs     = σ_obs,
+                            ν         = ν,
+                            λ_smooth  = λ_smooth,
+                            iterations = iterations,
+                            g_tol     = g_tol)
+
+        n_valid = length(findall(reach.valid))
+        n_converged = !isnothing(res.result) && res.result.stopped_by.g_converged
+
+        println("$(reachid): VALID (n=$(round(res.n_post, digits=4)), " *
+                "r=$(round(res.r_post, digits=2)), " *
+                "z0=$(round(res.z0_post, digits=2)), " *
+                "$(n_valid) valid ts, " *
+                "converged=$(n_converged))")
+
+        write_output(reachid, 1, outdir, res, reach.nt, W, time_str)
+
+    catch e
+        @warn "$(reachid): v2 inference failed" exception=(e, catch_backtrace())
+        println("$(reachid): INVALID — v2 inference error")
+        write_output(reachid, 0, outdir, nothing, reach.nt, W, time_str)
     end
 end
