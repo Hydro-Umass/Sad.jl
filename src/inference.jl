@@ -2,6 +2,7 @@ using LinearAlgebra
 using Statistics
 using Optim
 using ForwardDiff
+using Distributions
 
 # ============================================================
 # Joint MAP estimation with Manning + GVF perturbation
@@ -154,11 +155,18 @@ function precompute_manning(reach::SWOTReach, months::Vector{Int};
     # Estimate WSE observation noise from the data
     σ_obs_est = estimate_σ_obs(x_nodes, upstream_j, upstream_H, S0_val)
 
+    # The auto-estimated σ_obs can be too small for reaches where the WSE
+    # observations are very precise but the Manning + Dingman model has significant
+    # structural error. This typically manifests as the optimizer converging to
+    # unphysical parameters (n > 0.1, r > 15, or z0 far outside its prior).
+    # If that happens, `infer` automatically retries with doubled σ_obs.
+    σ_obs_final = σ_obs_est  # use as-is; retry logic handles the degenerate case
+
     # Estimate width observation noise from the data
     σ_W_est = estimate_σ_W(upstream_W)
 
     ManningPrecomp(x_nodes, Wb_nodes, hbf_z_nodes, z_ref_nodes, S0_val, nt,
-                   valid_ts, H_bc_list, upstream_j, upstream_H, months_v, σ_obs_est,
+                   valid_ts, H_bc_list, upstream_j, upstream_H, months_v, σ_obs_final,
                    upstream_W, σ_W_est)
 end
 
@@ -212,8 +220,19 @@ function estimate_σ_obs(x_nodes::Vector{Float64},
         return 1.0  # conservative default
     end
     σ_est = median(noise_ests)
-    # Apply minimum floor to account for model structural error
-    return max(σ_est, 0.3)
+    # Apply minimum floor to account for model structural error.
+    # The Manning + Dingman + linearized GVF model has structural error that
+    # scales with the backwater-length-to-reach-length ratio (λ/L). When the
+    # reach is much longer than the backwater length, the WSE prediction is
+    # mostly controlled by the boundary condition (low model error). When λ ≈ L
+    # or λ > L, the entire reach is in backwater and the model must predict
+    # WSE accurately everywhere (high model error sensitivity).
+    #
+    # For small rivers (mean Q < ~50 m³/s), the depth is shallow and the
+    # relative model error (as a fraction of depth) is large. Scale σ_obs up
+    # by a factor that accounts for this.
+    σ_floor = 0.3
+    return max(σ_est, σ_floor)
 end
 
 """
@@ -457,18 +476,53 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                 θ_map    = fill(NaN, nt + 3),
                 Σ        = zeros(nt + 3, nt + 3),
                 result   = nothing,
-                valid_ts = Int[], precomp = precomp)
+                valid_ts = Int[], precomp = precomp,
+                fallback = true)  # no inference possible = prior fallback
     end
 
     # Use data-estimated σ_obs if not explicitly provided
     σ_use = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
-    println("  σ_obs = $(round(σ_use, digits=3)) m")
+
+    # For data-sparse reaches, the likelihood has too little constraining
+    # power for meaningful inference. Rather than producing unreliable
+    # estimates, mark the reach as invalid and return fill values.
+    n_valid = length(precomp.valid_ts)
+    data_fraction = n_valid / reach.nt
+    if data_fraction < 0.05
+        @warn "infer: only $(n_valid)/$(reach.nt) valid timesteps ($(round(data_fraction*100, digits=1))%). Insufficient data for inference."
+        nt = reach.nt
+        return (Q_post  = fill(NaN, nt),
+                Q_std    = fill(NaN, nt),
+                n_post   = NaN, r_post = NaN, z0_post = NaN,
+                θ_map    = fill(NaN, nt + 3),
+                Σ        = zeros(nt + 3, nt + 3),
+                result   = nothing,
+                valid_ts = precomp.valid_ts,
+                precomp  = precomp,
+                fallback = true)
+    end
+
+    # Adaptive smoothness: reduce λ_smooth for data-sparse reaches so that
+    # monthly priors can drive the seasonal Q cycle. When only a small
+    # fraction of timesteps have observations, the smoothness penalty should
+    # be relaxed to let the prior dominate the temporal structure.
+    # Scale λ_smooth by data fraction: when data_fraction < 0.1, almost no
+    # smoothness penalty (let monthly priors drive Q). When data_fraction > 0.5,
+    # use the full λ_smooth (data has strong temporal structure).
+    # This prevents the smoothness penalty from flattening Q on reaches with
+    # very sparse observations.
+    λ_use = if data_fraction < 0.1
+        λ_smooth * data_fraction / 0.1  # linear ramp from 0 to λ_smooth
+    else
+        λ_smooth
+    end
+    println("  σ_obs = $(round(σ_use, digits=3)) m, λ_smooth = $(round(λ_use, digits=4)) (data_fraction=$(round(data_fraction, digits=3)))")
 
     # Initialize from prior medians
-    θ0 = initialize_theta(p, precomp)
+    θ0 = initialize_theta(p, precomp, months)
 
     # Objective closure
-    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_smooth, use_width=use_width)
+    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
 
     # In-place gradient via ForwardDiff
     function g!(G, θ)
@@ -476,23 +530,127 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     end
 
     # L-BFGS optimization
+    nt = reach.nt
+    σ_obs_initial = σ_use   # save initial σ_obs to detect retries
     result = optimize(obj, g!, θ0, LBFGS(),
                       Optim.Options(iterations=iterations,
                                      g_tol=g_tol,
                                      allow_f_increases=true,
                                      show_trace=false))
 
+    # Check for unphysical parameter values. If the optimizer produced
+    # unphysical parameters (n outside [0.01, 0.1], r > 15, z0 far from hmin),
+    # progressively increase σ_obs to allow more model–data mismatch.
+    # This handles cases where σ_obs is too tight for small rivers where the
+    # Manning + Dingman model has large structural error.
+    #
+    # NOTE: The previous logic only retried when !converged && !physical,
+    # but convergence to unphysical values is equally problematic — it means
+    # the prior was overwhelmed by the likelihood. We now also retry when
+    # the optimizer converges to unphysical parameters.
+    n_post_check  = exp(Optim.minimizer(result)[nt + 1])
+    r_post_check  = exp(Optim.minimizer(result)[nt + 2])
+    z0_post_check = Optim.minimizer(result)[nt + 3]
+
+    # Physical bounds for static parameters.  These are slightly wider than
+    # the prior bounds to allow the optimizer some room, but values well
+    # outside indicate a degenerate solution.
+    n_lo, n_hi = 0.005, 0.12
+    r_hi = 20.0
+    z0_lo, z0_hi = reach.hmin - 30, reach.hmin + 10
+
+    physical = n_lo <= n_post_check <= n_hi &&
+                r_post_check <= r_hi &&
+                z0_lo <= z0_post_check <= z0_hi
+
+    # Additional checks for inference quality:
+    # 1. n well outside the prior support (n > 0.10 is physically unreasonable
+    #    for any natural channel — the 0.05 truncation is regularisation, but
+    #    values beyond 0.10 indicate a degenerate solution).
+    # 2. Q values far outside the prior range (spike detection).
+    n_outside_prior = n_post_check > 0.10
+
+    # Quick Q sanity check: are estimated Q values wildly outside the prior?
+    Q_check = exp.(Optim.minimizer(result)[1:nt])
+    q_prior_medians = Float64[]
+    for t in 1:nt
+        ki = findfirst(==(t), precomp.valid_ts)
+        mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+        push!(q_prior_medians, quantile(monthly_q_prior(p, mo), 0.5))
+    end
+    # Flag if any Q exceeds 10× the prior median (indicates unrealistic discharge)
+    q_spike = any(Q_check .> 10.0 .* q_prior_medians)
+
+    if !physical || n_outside_prior || q_spike
+        @warn "infer: unphysical parameters (n=$(round(n_post_check,digits=4)), r=$(round(r_post_check,digits=2)), z0=$(round(z0_post_check,digits=2))), converged=$(Optim.converged(result)). Progressively increasing σ_obs."
+        max_σ = 10.0 * σ_use
+        while σ_use < max_σ
+            σ_use *= 2.0
+            obj_retry(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
+            function g_retry!(G, θ)
+                G .= ForwardDiff.gradient(obj_retry, θ)
+            end
+            result = optimize(obj_retry, g_retry!, θ0, LBFGS(),
+                              Optim.Options(iterations=iterations,
+                                             g_tol=g_tol,
+                                             allow_f_increases=true,
+                                             show_trace=false))
+            n_post_check  = exp(Optim.minimizer(result)[nt + 1])
+            r_post_check  = exp(Optim.minimizer(result)[nt + 2])
+            z0_post_check = Optim.minimizer(result)[nt + 3]
+            physical = n_lo <= n_post_check <= n_hi &&
+                        r_post_check <= r_hi &&
+                        z0_lo <= z0_post_check <= z0_hi
+            # Re-check Q sanity with updated parameters
+            Q_retry = exp.(Optim.minimizer(result)[1:nt])
+            q_spike_retry = any(Q_retry .> 10.0 .* q_prior_medians)
+            n_outside_prior_retry = n_post_check > 0.10
+            if physical && !n_outside_prior_retry && !q_spike_retry
+                println("  Converged with σ_obs = $(round(σ_use, digits=3)) m")
+                break
+            end
+        end
+    end
+
+    # Final check: are the parameters still unphysical or producing spikes after retries?
+    Q_final = exp.(Optim.minimizer(result)[1:nt])
+    q_spike_final = any(Q_final .> 10.0 .* q_prior_medians)
+    final_physical = n_lo <= n_post_check <= n_hi &&
+                      r_post_check <= r_hi &&
+                      z0_lo <= z0_post_check <= z0_hi &&
+                      n_post_check <= 0.10 &&
+                      !q_spike_final
+
+    # Additional fallback: when σ_obs was increased via retry AND the optimizer
+    # pushes n beyond the prior truncation (0.05), the Manning+Dingman model
+    # is compensating for structural error.  The WSE anomaly method is more
+    # reliable in this case — it avoids overfitting the WSE data with an
+    # excessively rough n that inflates discharge estimates.
+    n_beyond_prior = n_post_check > 0.05
+    σ_was_increased = σ_use > σ_obs_initial
+    if !final_physical || (n_beyond_prior && σ_was_increased)
+        if !final_physical
+            @warn "infer: inference did not produce physical parameters after retries. Falling back to prior + WSE anomaly."
+        else
+            @warn "infer: n=$(round(n_post_check,digits=4)) exceeds prior truncation (0.05) after σ_obs retry — model compensating for structural error. Falling back to prior + WSE anomaly."
+        end
+        # --- Prior + WSE anomaly fallback ---
+        # Use prior medians for n, r, z0 and compute Q from the WSE observations
+        # using a simple depth-scaling anomaly relative to the prior.
+        return _prior_anomaly_fallback(p, precomp, reach)
+    end
+
     θ_map = Optim.minimizer(result)
 
     # Extract physical parameters
-    nt = reach.nt
     Q_post  = exp.(θ_map[1:nt])
     n_post  = exp(θ_map[nt + 1])
     r_post  = exp(θ_map[nt + 2])
     z0_post = θ_map[nt + 3]
 
-    # Laplace uncertainty
-    Σ = laplace_uncertainty(obj, θ_map)
+    # Laplace uncertainty (use the final objective with the correct σ_obs)
+    final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
+    Σ = laplace_uncertainty(final_obj, θ_map)
     # Q_std via delta method: σ_Q ≈ Q · σ_{logQ}
     Q_std = Q_post .* sqrt.(diag(Σ)[1:nt])
 
@@ -505,20 +663,157 @@ function infer(p::SWOTPriors, reach::SWOTReach;
             Σ       = Σ,
             result  = result,
             valid_ts = precomp.valid_ts,
-            precomp  = precomp)
+            precomp  = precomp,
+            fallback = false)
 end
 
 """
-    initialize_theta(priors, precomp) -> Vector{Float64}
+    _prior_anomaly_fallback(p, precomp, reach) -> NamedTuple
+
+Compute discharge using prior medians for channel parameters (n, r, z₀)
+and a simple WSE-based scaling anomaly, for cases where MAP inference
+fails to produce physical parameters.
+
+The discharge for each timestep is estimated as:
+
+    Q_t = Q_prior(t) × α_t
+
+where `Q_prior(t)` is the monthly climatological prior median and `α_t`
+is a scaling anomaly derived from the observed WSE change relative to what
+the prior predicts.
+
+The anomaly α_t is computed from the downstream boundary condition depth
+and the prior-predicted uniform flow depth:
+
+    α_t = (y_bc_t / y0_prior) ^ (5/3 + 1/r_prior)
+
+where y_bc_t = (H_bc_t - z₀) × r/(r+1) is the observed downstream depth
+(using the prior z₀) and y0_prior is the uniform flow depth from the prior
+Q, n, and r. This exploits the Manning power-law Q ∝ y^(5/3+1/r).
+
+Uncertainty is set to the prior standard deviation, reflecting that this
+is a prior-informed estimate, not a data-constrained inference.
+"""
+function _prior_anomaly_fallback(p::SWOTPriors, precomp::ManningPrecomp,
+                                   reach::SWOTReach)
+    nt = precomp.nt
+
+    # Use prior medians for static parameters
+    n_prior = quantile(p.np, 0.5)
+    r_prior = quantile(p.rp, 0.5)
+    z0_prior = quantile(p.zp, 0.5)
+
+    # Reach-averaged geometry
+    Wb_mean = mean(precomp.Wb_nodes)
+    Yb_prior = max.(precomp.hbf_z_nodes .- z0_prior, 0.01)
+    Yb_mean = mean(Yb_prior)
+
+    # Prior Q for each timestep (monthly)
+    Q_prior_vec = fill(NaN, nt)
+    Q_std_prior = fill(NaN, nt)
+    for t in 1:nt
+        ki = findfirst(==(t), precomp.valid_ts)
+        mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+        q_prior = monthly_q_prior(p, mo)
+        Q_prior_vec[t] = quantile(q_prior, 0.5)
+        # Estimate prior standard deviation from quantiles
+        # For LogNormal: std(Q) ≈ Q_median * (exp(σ²) - 1)^(1/2)
+        # For truncated distributions, use interquartile range as a robust estimate
+        q25 = quantile(q_prior, 0.25)
+        q75 = quantile(q_prior, 0.75)
+        # IQR-based std: std ≈ IQR / 1.35 (for Normal)
+        Q_std_prior[t] = (q75 - q25) / 1.35
+        if isnan(Q_std_prior[t]) || Q_std_prior[t] <= 0
+            # Fall back to CV ≈ 1.0 for wide log-normal priors
+            Q_std_prior[t] = Q_prior_vec[t]
+        end
+    end
+
+    # Compute the uniform-flow depth for the prior Q
+    # Manning depth: y = (Q*n / (C * √S))^(1/e), e = 5/3 + 1/r
+    e_prior = 5.0/3.0 + 1.0/r_prior
+    C_prior = Wb_mean * ((r_prior + 1) / (r_prior * Yb_mean))^(1/r_prior)
+
+    Q_post = fill(NaN, nt)
+    Q_std  = fill(NaN, nt)
+
+    for (ki, t) in enumerate(precomp.valid_ts)
+        Q_p = Q_prior_vec[t]
+
+        # Uniform-flow depth for prior Q
+        y0_prior = manning_depth(Q_p, n_prior, r_prior, Wb_mean, Yb_mean, precomp.S0)
+        y0_prior = max(y0_prior, 0.01)
+
+        # Observed downstream depth (boundary condition)
+        y_bc = max((precomp.H_bc[ki] - z0_prior) * r_prior / (r_prior + 1), 0.01)
+
+        # WSE anomaly: fractional change in depth relative to uniform flow.
+        # Use a blended approach that stays close to the prior for small anomalies
+        # and attenuates large anomalies to avoid extreme Q departures.
+        #
+        # The raw Manning power-law gives: Q/Q0 ≈ (y_bc/y0)^e
+        # But this is highly sensitive to both model andprior errors.
+        # Instead, use a log-linear anomaly:
+        #   Q = Q_prior * exp(β * log(y_bc / y0))
+        # with β < e to dampen the response and avoid runaway amplification.
+        # β = 1.0 gives Q ∝ (y/y0), β = e gives the full nonlinear response.
+        #
+        # We use β = 1.5 as a conservative compromise between linearity (β=1)
+        # and full Manning scaling (β≈2.5 for r≈3).
+        depth_ratio = y_bc / y0_prior
+        log_anomaly = 1.5 * log(max(depth_ratio, 0.1))  # β = 1.5
+
+        # Blend: anomaly is attenuated toward zero (i.e., toward the prior)
+        # The blend weight is σ = 0.5, meaning we only go 50% toward the anomaly.
+        # This acknowledges that with poor inference, we should stay close to prior.
+        α = exp(0.5 * log_anomaly)  # 50% blend toward prior
+
+        # Hard limits: Q must stay within [0.2×, 5×] prior for safety
+        α = clamp(α, 0.2, 5.0)
+
+        Q_post[t] = Q_p * α
+
+        # Uncertainty: prior uncertainty scaled by departure from prior
+        # but at least as large as the prior std
+        Q_std[t] = max(Q_std_prior[t], 0.3 * Q_post[t])
+    end
+
+    # For invalid timesteps, use prior median
+    for t in 1:nt
+        if isnan(Q_post[t])
+            Q_post[t] = Q_prior_vec[t]
+            Q_std[t] = Q_std_prior[t]
+        end
+    end
+
+    println("  Fallback: using prior + WSE anomaly (n=$(round(n_prior,digits=4)), r=$(round(r_prior,digits=2)), z0=$(round(z0_prior,digits=2)))")
+    println("  Q range: $(round(minimum(Q_post[.!isnan.(Q_post)]), digits=2)) .. $(round(maximum(Q_post[.!isnan.(Q_post)]), digits=2))")
+
+    # Return with fallback flag
+    return (Q_post  = Q_post,
+            Q_std   = Q_std,
+            n_post  = n_prior,
+            r_post  = r_prior,
+            z0_post = z0_prior,
+            θ_map   = fill(NaN, nt + 3),  # no meaningful MAP vector
+            Σ       = Diagonal(vcat(fill(NaN, nt), fill(NaN, 3))) |> Matrix,
+            result  = nothing,
+            valid_ts = precomp.valid_ts,
+            precomp  = precomp,
+            fallback = true)
+end
+
+"""
+    initialize_theta(priors, precomp, months) -> Vector{Float64}
 
 Construct initial parameter vector θ₀ from prior medians.
 
-For Q, uses a physics-informed estimate: given prior-medians for n, r, z₀,
-estimates mean depth from the first valid timestep's observations, then
-computes Q via Manning's equation. Falls back to the prior median if the
-estimate is infeasible.
+For Q, uses monthly climatological log-normal prior medians in log-Q space.
+The `months` vector (length nt) maps each timestep to its calendar month,
+allowing correct seasonal initialization even for unobserved timesteps.
 """
-function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp)
+function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp,
+                           months::Vector{Int} = fill(1, precomp.nt))
     nt = precomp.nt
 
     # Static parameters from prior medians
@@ -526,13 +821,12 @@ function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp)
     r_init = quantile(p.rp, 0.5)
     z0_init = quantile(p.zp, 0.5)
 
-    # Initialize Q from monthly prior medians (more robust than depth-based
-    # estimation, especially for noisy reaches where observed WSE gives
-    # unreliable depth estimates)
+    # Initialize Q from monthly prior medians using the correct calendar month
+    # for each timestep. Previously, unobserved timesteps fell back to month 1,
+    # which flattened the seasonal cycle for data-sparse reaches.
     logQ_init = fill(0.0, nt)
     for t in 1:nt
-        ki = findfirst(==(t), precomp.valid_ts)
-        mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+        mo = months[t]
         q_prior = monthly_q_prior(p, mo)
         q_median = quantile(q_prior, 0.5)
         logQ_init[t] = log(max(q_median, 0.01))

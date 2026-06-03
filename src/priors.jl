@@ -70,7 +70,12 @@ function priors(sosfile::String, hmin::Float64, reachid::Int;
         g = f.group["gbpriors"].group["reach"]
         n_l = exp(g["lowerbound_logn"][i])
         n_u = exp(g["upperbound_logn"][i])
-        # np = try Uniform(n_l, n_u) catch; Uniform(0.01, 0.07) end
+        # Manning's n prior: truncated Normal centred at 0.03 with support [0.01, 0.05].
+        # The tight upper bound at 0.05 acts as regularisation — values above 0.05
+        # are uncommon and typically indicate the optimizer is compensating for
+        # model structural error.  The n_outside_prior check (threshold 0.10)
+        # will flag genuinely unphysical values, while a Q-spike check catches
+        # degenerate discharge estimates.
         np = truncated(Normal(0.03, 0.01), 0.01, 0.05)
         # channel shape parameter
         r_m = exp(g["logr_hat"][i])
@@ -87,14 +92,35 @@ function priors(sosfile::String, hmin::Float64, reachid::Int;
             return missing
         end
         Qp = _build_q_prior(f, i, q_m, q_l, q_u)
-        # Estimate slope from the reach data or use default
+        # Estimate slope from the reach data or use default.
+        # Protect against NaN slope (can happen when all slope observations are
+        # missing and the fallback mean produces NaN).
         S0_est = isnothing(S0) ? 1e-4 : S0
         S0_est = max(S0_est, 1e-5)
+        if isnan(S0_est)
+            S0_est = 1e-4
+        end
+
         # bed elevation — use Manning-based depth estimate for better accuracy
         q_m_f     = Float64(q_m)
         depth_est = _manning_depth_estimate(q_m_f, S0_est, n_est=0.035)
         z0_est    = hmin - depth_est
-        zp = Uniform(z0_est - depth_est, z0_est + depth_est)  # wider prior to account for depth uncertainty
+
+        # Guard against degenerate z0 prior when hmin is zero (e.g., no valid
+        # WSE observations) or depth_est is zero. When hmin ≈ 0 the uniform
+        # bounds collapse, so we widen the prior significantly.
+        z0_lo = z0_est - depth_est
+        z0_hi = z0_est + depth_est
+        if z0_lo >= z0_hi
+            # Fallback: use a wide prior centred on a reasonable bed elevation
+            z0_lo = hmin - 15.0
+            z0_hi = hmin + 5.0
+            if z0_lo >= z0_hi
+                z0_lo = 0.0
+                z0_hi = 10.0
+            end
+        end
+        zp = Uniform(z0_lo, z0_hi)
         SWOTPriors(Qp, np, rp, zp)
     end
 end
@@ -200,8 +226,8 @@ function priors(qwbm::Float64, hmin::Float64, class::River;
     rbnds = [(0.5, 1.0), (1.0, 5.0), (5.0, 10.0), (10.0, 20.0)]
     q_cv = 1.0
     Qp = truncated(LogNormal(log(qwbm) - q_cv^2 / 2, q_cv), 0.1 * qwbm, 10 * qwbm)
-    # n_lo = qwbm > 500.0 ? 0.025 : (qwbm > 100.0 ? 0.020 : 0.015)
-    # np = Uniform(n_lo, 0.07)
+    # n prior: tight bounds [0.01, 0.05] for regularisation;
+    # n_outside_prior check at 0.10 catches unphysical values.
     np = truncated(Normal(0.03, 0.01), 0.01, 0.05)
     rp = Uniform(rbnds[Int(class)]...)
     zp = z0_prior(qwbm, hmin, reach)
@@ -221,11 +247,26 @@ function z0_prior(qwbm::Float64, hmin::Float64, reach)
         W_med = reach.wbf(reach.x[end])
         n_est = qwbm > 500.0 ? 0.035 : 0.030
         S_use = max(S_med, 1e-5)
+        # Protect against NaN slope (all observations missing)
+        if isnan(S_use)
+            S_use = 1e-4
+        end
         depth_est = (n_est * qwbm / (W_med * sqrt(S_use)))^0.6
         depth_est = clamp(depth_est, 2.0, 20.0)
     else
         depth_est = qwbm > 500.0 ? 7.0 : (qwbm > 100.0 ? 5.0 : 3.0)
     end
     z0_est = hmin - depth_est
-    return Uniform(z0_est - 3.0, z0_est + 3.0)
+    # Guard against degenerate Uniform when hmin is zero or depth_est is invalid
+    z0_lo = z0_est - 3.0
+    z0_hi = z0_est + 3.0
+    if z0_lo >= z0_hi
+        z0_lo = hmin - 15.0
+        z0_hi = hmin + 5.0
+        if z0_lo >= z0_hi
+            z0_lo = 0.0
+            z0_hi = 10.0
+        end
+    end
+    return Uniform(z0_lo, z0_hi)
 end

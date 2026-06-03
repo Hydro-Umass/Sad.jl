@@ -102,11 +102,11 @@ function write_output(reachid, valid, outdir, res, nt, W, time_str)
     if valid == 1 && !isnothing(res)
         # MAP channel parameters
         nv = defVar(out, "n", Float64, (), fillvalue = FILL)
-        nv[:] = res.n_post
+        nv[:] = Float64(res.n_post)
         rv = defVar(out, "r", Float64, (), fillvalue = FILL)
-        rv[:] = res.r_post
+        rv[:] = Float64(res.r_post)
         z0v = defVar(out, "z0", Float64, (), fillvalue = FILL)
-        z0v[:] = res.z0_post
+        z0v[:] = Float64(res.z0_post)
 
         # Discharge: posterior mean and uncertainty
         Qa = defVar(out, "Qa", Float64, ("nt",), fillvalue = FILL)
@@ -114,11 +114,17 @@ function write_output(reachid, valid, outdir, res, nt, W, time_str)
         Qu = defVar(out, "Q_u", Float64, ("nt",), fillvalue = FILL)
         Qu[:] = replace(res.Q_std, NaN => FILL)
 
-        # Convergence info
+        # Convergence / fallback info
+        fallback = haskey(res, :fallback) ? res.fallback : false
+        out.attrib["fallback"] = fallback ? 1 : 0
         if !isnothing(res.result)
             out.attrib["converged"] = string(res.result.stopped_by.g_converged)
             out.attrib["iterations"] = res.result.iterations
             out.attrib["nll_minimum"] = Float64(Optim.minimum(res.result))
+        elseif fallback
+            out.attrib["converged"] = "false_fallback"
+            out.attrib["iterations"] = 0
+            out.attrib["nll_minimum"] = Float64(NaN)
         end
     else
         nv = defVar(out, "n", Float64, (), fillvalue = FILL)
@@ -193,16 +199,24 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
                             iterations = iterations,
                             g_tol     = g_tol)
 
-        n_valid = length(findall(reach.valid))
-        n_converged = !isnothing(res.result) && res.result.stopped_by.g_converged
+        # Check if inference produced valid results
+        # (data-sparse reaches return NaN with fallback=true)
+        has_result = !isnothing(res.result)
+        is_fallback = haskey(res, :fallback) ? res.fallback : false
+        is_valid = !isnan(res.n_post) && !is_fallback
 
-        println("$(reachid): VALID (n=$(round(res.n_post, digits=4)), " *
-                "r=$(round(res.r_post, digits=2)), " *
-                "z0=$(round(res.z0_post, digits=2)), " *
-                "$(n_valid) valid ts, " *
-                "converged=$(n_converged))")
-
-        write_output(reachid, 1, outdir, res, reach.nt, W, time_str)
+        if is_valid
+            n_valid = length(findall(reach.valid))
+            println("$(reachid): VALID (n=$(round(res.n_post, digits=4)), " *
+                    "r=$(round(res.r_post, digits=2)), " *
+                    "z0=$(round(res.z0_post, digits=2)), " *
+                    "$(n_valid) valid ts, " *
+                    "converged=$(has_result ? res.result.stopped_by.g_converged : "N/A")")
+            write_output(reachid, 1, outdir, res, reach.nt, W, time_str)
+        else
+            println("$(reachid): INVALID — insufficient data or inference failed")
+            write_output(reachid, 0, outdir, nothing, reach.nt, W, time_str)
+        end
 
     catch e
         @warn "$(reachid): v2 inference failed" exception=(e, catch_backtrace())
