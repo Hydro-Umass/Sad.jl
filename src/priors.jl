@@ -59,7 +59,8 @@ otherwise falls back to the time-invariant model mean.
 
 Returns a `SWOTPriors` or `missing` if discharge prior cannot be constructed.
 """
-function priors(sosfile::String, hmin::Float64, reachid::Int)
+function priors(sosfile::String, hmin::Float64, reachid::Int;
+                   S0::Union{Nothing, Float64} = nothing)
     Dataset(sosfile) do f
         gr   = f.group["reaches"]
         idxs = findall(gr["reach_id"][:] .== reachid)
@@ -86,13 +87,34 @@ function priors(sosfile::String, hmin::Float64, reachid::Int)
             return missing
         end
         Qp = _build_q_prior(f, i, q_m, q_l, q_u)
-        # bed elevation — depth estimate scales with discharge magnitude
+        # Estimate slope from the reach data or use default
+        S0_est = isnothing(S0) ? 1e-4 : S0
+        S0_est = max(S0_est, 1e-5)
+        # bed elevation — use Manning-based depth estimate for better accuracy
         q_m_f     = Float64(q_m)
-        depth_est = q_m_f > 500.0 ? 7.0 : (q_m_f > 100.0 ? 5.0 : 3.0)
+        depth_est = _manning_depth_estimate(q_m_f, S0_est, n_est=0.035)
         z0_est    = hmin - depth_est
-        zp = Uniform(z0_est - 3.0, z0_est + 3.0)
+        zp = Uniform(z0_est - depth_est, z0_est + depth_est)  # wider prior to account for depth uncertainty
         SWOTPriors(Qp, np, rp, zp)
     end
+end
+
+"""
+    _manning_depth_estimate(q, S; n_est, Wb_est) -> Float64
+
+Estimate mean flow depth from Manning's equation, given discharge and slope.
+Uses a wide-channel approximation with typical width estimated from Q scaling.
+
+For a wide channel R ≈ y, Manning's equation gives:
+    Q = (1/n) * W * y^(5/3) * √S
+    y = (Q*n / (W * √S))^(3/5)
+
+Width is estimated from a Q-W scaling relationship: W ≈ 5 * Q^0.5 (empirical).
+"""
+function _manning_depth_estimate(q::Float64, S::Float64; n_est::Float64=0.035)
+    W_est = 5.0 * sqrt(max(q, 1.0))  # empirical width from Q scaling
+    y = (q * n_est / (W_est * sqrt(S)))^0.6  # 3/5 = 0.6
+    return clamp(y, 0.5, 15.0)  # physical bounds
 end
 
 """
@@ -127,7 +149,8 @@ function _monthly_distributions(monthly_means::Vector,
                                  q_l::Real, q_u::Real,
                                  q_m_annual::Real)
     map(1:12) do mo
-        q_cv = 0.5
+        q_cv = 1.0  # wider prior to allow Q to vary with WSE signal; 1.0 in log-space
+        # gives 95% CI ≈ [0.14, 7.4] × median, enough to capture floods/droughts
         qm_mo = Float64(monthly_means[mo])
         logmu = log(qm_mo) - q_cv^2 / 2
         logmu = isinf(logmu) ? log(q_m_annual) : logmu
@@ -147,7 +170,7 @@ end
 Build a single time-invariant truncated LogNormal discharge prior.
 """
 function _single_q_prior(q_m::Real, q_l::Real, q_u::Real)
-    q_cv = 0.5
+    q_cv = 1.0  # wider prior for robustness
     qm = log(q_m) - q_cv^2 / 2
     qm = isinf(qm) ? (q_u + q_l) / 2.0 : qm
     try
