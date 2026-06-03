@@ -1,164 +1,440 @@
 using LinearAlgebra
 using Statistics
-using StatsBase
-using EmpiricalDistributions
-using ProgressMeter
+using Optim
+using ForwardDiff
+
+# ============================================================
+# Joint MAP estimation with Manning + GVF perturbation
+# ============================================================
 
 """
-    compute_A0(reach, reach_ensemble) -> Float64
+    safe_logpdf(d, x)
 
-Compute the reference cross-sectional area A0 at the minimum observed
-downstream WSE (reach.hmin) using the posterior mean Dingman parameters.
+Compute log-pdf with smooth barrier for bounded distributions.
 
-In the Durand-Manning formulation:
-    Q = (1/n) * (A0 + dA)^(5/3) * W^(-2/3) * S^(1/2)
+For distributions with bounded support (e.g., Uniform), `-Inf` values outside
+the support crash ForwardDiff-based optimizers. This function replaces bounded
+log-pdf with a smooth approximation: a Normal matching the distribution's mean
+and variance, which has infinite support and is always ForwardDiff-differentiable.
 
-A0 is the cross-sectional area at the minimum observed WSE — the
-reference state from which SWOT dA observations are measured.
-
-Uses the Dingman power-law cross section:
-    A = Wb * (Ym / Yb)^(1/r) * y
-
-where y is the mean flow depth at hmin and Ym = (r+1)/r * y.
+For distributions with unbounded support (Normal, LogNormal, etc.), `logpdf`
+is returned unchanged.
 """
-function compute_A0(reach::SWOTReach, reach_ensemble::Matrix{Float64})
-    r_mean  = mean(reach_ensemble[2, :])
-    z0_mean = mean(reach_ensemble[3, :])
-
-    # downstream node geometry
-    x_ds = reach.x[1]
-    Wb   = reach.wbf(x_ds)                      # bankfull width [m]
-    hbf  = reach.hbf(x_ds)                      # bankfull WSE [m]
-    zx   = z0_mean + reach.z(x_ds)              # bed elevation at x_ds
-                                                  # = z0_mean since z(x[1])=0
-    Yb   = max(hbf - zx, 0.01)                  # bankfull mean depth [m]
-
-    # mean flow depth at minimum observed WSE
-    y0   = max((reach.hmin - zx) * r_mean / (r_mean + 1), 0.01)
-
-    # Dingman area at y0
-    Ym   = (r_mean + 1) / r_mean * y0
-    A0   = Wb * (Ym / Yb)^(1 / r_mean) * y0
-
-    return A0
+function safe_logpdf(d, x)
+    if d isa Uniform
+        # Replace Uniform(μ, σ) → Normal(mean, std) matching first two moments
+        μ_u = (minimum(d) + maximum(d)) / 2
+        σ_u = (maximum(d) - minimum(d)) / (2 * sqrt(3))
+        return logpdf(Normal(μ_u, σ_u), x)
+    elseif d isa Truncated
+        # Use the untruncated distribution logpdf but add a smooth quadratic
+        # barrier outside the truncation bounds. This preserves the
+        # distribution shape within bounds while providing a strong smooth
+        # gradient back toward the support when the optimizer strays outside.
+        lp = safe_logpdf(d.untruncated, x)
+        lo, hi = minimum(d), maximum(d)
+        # Barrier width: fraction of the support range
+        barrier_scale = (hi - lo) * 0.2
+        if x < lo
+            lp -= 0.5 * ((lo - x) / barrier_scale)^2
+        elseif x > hi
+            lp -= 0.5 * ((x - hi) / barrier_scale)^2
+        end
+        return lp
+    else
+        return logpdf(d, x)
+    end
 end
 
 """
-    letkf(A, d, HA, R; xs, ys, ρ, huber_threshold) -> Matrix{Float64}
+    ManningPrecomp
 
-Local Ensemble Transform Kalman Filter.
+Pre-computed reach data for the Manning forward model. Stores
+geometry and observation data that are constant across optimization
+iterations, avoiding redundant recomputation.
 
-State vector rows: [log(Q), n, r, z0]
-Q is assimilated in log-space to enforce Q > 0 after the update and
-improve Gaussianity of the Q marginal distribution.
+# Fields
+- `x_nodes`:      SWOT observation node chainage [m]
+- `Wb_nodes`:     bankfull width at each observation node [m]
+- `hbf_z_nodes`:  hbf(x) − z_ref(x) at each node [m] — the z₀-independent
+                   part of bankfull depth; Yb(z₀) = hbf_z_nodes − z₀
+- `z_ref_nodes`:  cumulative bed elevation reference z_ref at each node [m]
+              (z_ref[1] = 0 by convention; z₀ + z_ref(x) = total bed elevation)
+- `S0`:           reach-averaged bed slope [-]
+- `nt`:           total number of timesteps
+- `valid_ts`:     indices of valid timesteps
+- `H_bc`:         downstream boundary WSE, one per valid timestep [m]
+- `upstream_j`:   for each valid timestep, 1-based indices (into `x_nodes`)
+                   of non-missing upstream observations (j ≥ 2)
+- `upstream_H`:   for each valid timestep, observed WSE at those nodes [m]
+- `months_v`:     month (1–12) for each valid timestep
+"""
+struct ManningPrecomp
+    x_nodes::Vector{Float64}
+    Wb_nodes::Vector{Float64}
+    hbf_z_nodes::Vector{Float64}
+    z_ref_nodes::Vector{Float64}
+    S0::Float64
+    nt::Int
+    valid_ts::Vector{Int}
+    H_bc::Vector{Float64}
+    upstream_j::Vector{Vector{Int}}
+    upstream_H::Vector{Vector{Float64}}
+    months_v::Vector{Int}
+    σ_obs_est::Float64  # automatically estimated WSE observation noise [m]
+    upstream_W::Vector{Vector{Float64}}  # observed width at upstream nodes
+    σ_W_est::Float64    # automatically estimated width observation noise [m]
+end
+
+"""
+    precompute_manning(reach, months; S0) -> ManningPrecomp
+
+Pre-compute reach geometry and observation data for the Manning
+forward model. Call once before optimization.
 
 # Arguments
-- `A`:               (ndim × nens) state ensemble — row 1 is log(Q)
-- `d`:               (nobs,) observation vector
-- `HA`:              (nobs × nens) model-predicted observation ensemble
-- `R`:               (nobs,) diagonal observation error variances
-- `xs`:              state index patches for localisation (default: global)
-- `ys`:              observation index patches for localisation (default: global)
-- `ρ`:               covariance inflation factor (default 1.05)
-- `huber_threshold`: Huber κ; observations with |innovation|/σ_innov > κ have
-                     their R inflated by (|z|/κ)², downweighting outliers.
-                     Set to `Inf` to disable (default: 2.0).
+- `reach`:  `SWOTReach` from preprocessing
+- `months`: vector of month indices (1–12), one per timestep
+- `S0`:     optional reach-averaged bed slope; if `nothing`, computed as
+            `mean(reach.S0.(reach.x))`
 """
-function letkf(A::Matrix{Float64}, d::Vector{Float64},
-               HA::Matrix{Float64}, R::Vector{Float64};
-               xs::Union{Nothing, Vector{Vector{Int}}} = nothing,
-               ys::Union{Nothing, Vector{Vector{Int}}} = nothing,
-               ρ::Float64  = 1.05,
-               huber_threshold::Float64 = 2.0)
-    ndim, nens = size(A)
-    nobs       = length(d)
-    Aa         = zeros(ndim, nens)
+function precompute_manning(reach::SWOTReach, months::Vector{Int};
+                            S0::Union{Nothing, Float64} = nothing)
+    x_nodes    = collect(reach.obs.x)
+    Wb_nodes   = reach.wbf.(x_nodes)
+    hbf_nodes  = reach.hbf.(x_nodes)
+    z_ref_nodes = reach.z.(x_nodes)
+    hbf_z_nodes = hbf_nodes .- z_ref_nodes   # constant part of Yb(z₀)
+    S0_val = isnothing(S0) ? mean(reach.S0.(reach.x)) : S0
 
-    R_mat = Diagonal(R)
+    valid_ts = findall(reach.valid)
+    nt = reach.nt
 
-    Y = HA .- mean(HA, dims=2)
-    X = A  .- mean(A,  dims=2)
+    H_bc_list    = Float64[]
+    upstream_j   = Vector{Int}[]
+    upstream_H   = Vector{Float64}[]
+    upstream_W   = Vector{Float64}[]
+    months_v     = Int[]
 
-    if isnothing(xs) || isnothing(ys)
-        xs = [collect(1:ndim)]
-        ys = [collect(1:nobs)]
-    end
-
-    for (lx, ly) in zip(xs, ys)
-        Xl = X[lx, :]
-        Yl = Y[ly, :]
-        Rl = R_mat[ly, ly]
-
-        innov = d[ly] .- mean(HA[ly, :], dims=2)[:]
-
-        # Huber robust update: inflate R for observations whose normalised
-        # innovation exceeds the threshold.  σ_innov combines ensemble spread
-        # (HPH^T diagonal) with the prior observation error (R diagonal) so
-        # the threshold is dimensionless and reach-independent.
-        if isfinite(huber_threshold)
-            σ_innov  = sqrt.(diag(Yl * Yl') ./ (nens - 1) .+ diag(Matrix(Rl)))
-            z        = abs.(innov) ./ σ_innov
-            factors  = max.(1.0, z ./ huber_threshold) .^ 2
-            Rl       = Diagonal(diag(Matrix(Rl)) .* factors)
+    for t in valid_ts
+        # Downstream boundary condition: use the most downstream RAW observation
+        # rather than the interpolated grid, which can be unreliable when the
+        # downstream node has missing data and PCHIP extrapolates poorly.
+        H_bc_val = NaN
+        for j in 1:length(x_nodes)
+            if !ismissing(reach.obs.H[j, t])
+                H_bc_val = Float64(reach.obs.H[j, t])
+                break
+            end
         end
-
-        C  = Yl' * inv(Matrix(Rl))
-        P  = inv((nens - 1) / ρ * I + C * Yl)
-        W  = real(sqrt(Symmetric((nens - 1) * P)))
-        w  = P * C * innov
-        W  = W .+ reshape(w, :, 1)
-
-        Aa[lx, :] = Xl * W .+ mean(A[lx, :], dims=2)
+        # Fallback to interpolated grid if no raw observation exists
+        if isnan(H_bc_val)
+            H_bc_val = reach.H[1, t]
+        end
+        push!(H_bc_list, H_bc_val)
+        # Collect non-missing upstream observations (j >= 2)
+        js   = Int[]
+    Hobs = Float64[]
+    Wobs = Float64[]
+        for j in 2:length(x_nodes)
+            h_valid = !ismissing(reach.obs.H[j, t])
+            w_valid = !ismissing(reach.obs.W[j, t])
+            if h_valid || w_valid
+                push!(js, j)
+                push!(Hobs, h_valid ? Float64(reach.obs.H[j, t]) : NaN)
+                push!(Wobs, w_valid ? Float64(reach.obs.W[j, t]) : NaN)
+            end
+        end
+        push!(upstream_j, js)
+        push!(upstream_H, Hobs)
+        push!(upstream_W, Wobs)
+        push!(months_v, months[t])
     end
 
-    return Aa
+    # Estimate WSE observation noise from the data
+    σ_obs_est = estimate_σ_obs(x_nodes, upstream_j, upstream_H, S0_val)
+
+    # Estimate width observation noise from the data
+    σ_W_est = estimate_σ_W(upstream_W)
+
+    ManningPrecomp(x_nodes, Wb_nodes, hbf_z_nodes, z_ref_nodes, S0_val, nt,
+                   valid_ts, H_bc_list, upstream_j, upstream_H, months_v, σ_obs_est,
+                   upstream_W, σ_W_est)
+end
+
+"""
+    estimate_σ_obs(x_nodes, upstream_j, upstream_H, S0) -> Float64
+
+Estimate WSE observation noise from the raw SWOT observations.
+
+For each valid timestep, compute the standard deviation of residuals
+between observed WSE and a smooth monotonic profile (approximated by the
+expected WSE from bed slope). The median across timesteps gives a robust
+noise estimate. A minimum floor of 0.3 m is applied to account for model
+structural error beyond pure observation noise.
+
+# Arguments
+- `x_nodes`:   observation node chainage [m]
+- `upstream_j`: per-timestep indices of non-missing upstream nodes
+- `upstream_H`: per-timestep observed WSE at those nodes [m]
+- `S0`:         reach-averaged bed slope [-]
+
+# Returns
+Estimated WSE observation error σ_obs [m]
+"""
+function estimate_σ_obs(x_nodes::Vector{Float64},
+                        upstream_j::Vector{Vector{Int}},
+                        upstream_H::Vector{Vector{Float64}},
+                        S0::Float64)
+    noise_ests = Float64[]
+    for k in 1:length(upstream_j)
+        js = upstream_j[k]
+        Hobs = upstream_H[k]
+        x_vals = x_nodes[js]
+        # Filter to only non-NaN H obs (node may have width but not WSE)
+        valid_idx = findall(idx -> !isnan(Hobs[idx]), 1:length(js))
+        if length(valid_idx) < 3
+            continue
+        end
+        H_valid = Hobs[valid_idx]
+        resid_sq = Float64[]
+        for ii in 2:length(H_valid)-1
+            r = H_valid[ii] - 0.5 * (H_valid[ii-1] + H_valid[ii+1])
+            push!(resid_sq, r^2)
+        end
+        if !isempty(resid_sq)
+            # σ from local residuals (factor 2/3 corrects for 3-point averaging)
+            σ_t = sqrt(mean(resid_sq) * 2.0 / 3.0)
+            push!(noise_ests, σ_t)
+        end
+    end
+    if isempty(noise_ests)
+        return 1.0  # conservative default
+    end
+    σ_est = median(noise_ests)
+    # Apply minimum floor to account for model structural error
+    return max(σ_est, 0.3)
+end
+
+"""
+    estimate_σ_W(upstream_W) -> Float64
+
+Estimate width observation noise from the raw SWOT observations.
+Computes the median coefficient of variation (CV) of width across valid
+upstream nodes for each timestep, then scales by median width.
+A minimum floor ensures model structural error is accounted for.
+"""
+function estimate_σ_W(upstream_W::Vector{Vector{Float64}})
+    cv_ests = Float64[]
+    for k in 1:length(upstream_W)
+        Wobs = filter(w -> !isnan(w) && w > 0, upstream_W[k])
+        if length(Wobs) < 3
+            continue
+        end
+        # CV of width across nodes estimates spatial variability,
+        # which is a lower bound on observational noise
+        cv = std(Wobs) / mean(Wobs)
+        push!(cv_ests, cv)
+    end
+    if isempty(cv_ests)
+        return 30.0  # conservative default [m]
+    end
+    median_cv = median(cv_ests)
+    # Typical SWOT width uncertainty is 10-20% of width
+    σ_estimate = max(median_cv * 0.5, 0.10)  # at least 10% CV
+    # Convert CV to absolute noise: use mean width as reference
+    # (will be scaled per-node in the likelihood using Wb)
+    return σ_estimate  # return as fractional uncertainty (unitless)
+end
+
+"""
+    neg_log_joint(θ, precomp, priors; σ_obs, ν, λ_smooth) -> Real
+
+Negative log-joint for MAP estimation over all parameters simultaneously.
+
+The parameter vector θ encodes:
+- `θ[1:nt]` = log(Q_t)  — discharge at each timestep (log-space)
+- `θ[nt+1]` = log(n)    — Manning roughness (log-space)
+- `θ[nt+2]` = log(r)    — Dingman shape exponent (log-space)
+- `θ[nt+3]` = z₀        — downstream bed elevation (natural space)
+
+The objective comprises four terms:
+1. **WSE likelihood**: Student-t (ν < ∞) or Gaussian (ν = Inf) per-node
+   residuals between predicted and observed WSE at upstream nodes (j ≥ 2).
+2. **Q priors**: monthly climatological log-normal priors in log-Q space.
+3. **Static priors**: on n, r, z₀ from the SoS database.
+4. **Temporal smoothness**: penalty on successive log-Q differences.
+
+# Arguments
+- `θ`:        parameter vector of length `nt + 3`
+- `precomp`:  `ManningPrecomp` with pre-computed reach data
+- `priors`:   `SWOTPriors` with prior distributions
+
+# Keyword arguments
+- `σ_obs`:     observation error scale [m] (default `NaN`: auto-estimated from data)
+- `ν`:         Student-t degrees of freedom; `Inf` = Gaussian (default `5.0`)
+- `λ_smooth`:  temporal smoothness weight on log-Q (default `0.0`, disabled)
+
+# Returns
+Scalar negative log-joint value. Minimized by `infer`.
+
+# Conventions (see AGENTS.md)
+- Q and n are estimated in log-space to enforce positivity and improve conditioning.
+- z₀ is in natural space (can be negative).
+- The downstream boundary WSE (H_bc, node j=1) is an INPUT to the forward model,
+  not an observation; the likelihood applies at nodes j ≥ 2 only.
+"""
+function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
+                       priors::SWOTPriors;
+                       σ_obs::Float64 = NaN,
+                       ν::Float64    = 5.0,
+                       λ_smooth::Float64 = 0.0,
+                       use_width::Bool = false)
+    # Auto-select σ_obs from estimated noise if not provided
+    σ = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
+    nt = precomp.nt
+    logQ = view(θ, 1:nt)
+    logn = θ[nt + 1]
+    logr = θ[nt + 2]
+    z0   = θ[nt + 3]
+
+    n = exp(logn)
+    r = exp(logr)
+
+    # Bankfull depth at each node (depends on z₀)
+    Yb_nodes = max.(precomp.hbf_z_nodes .- z0, 0.01)
+
+    nll = zero(z0)  # accumulator with correct Dual type
+
+    # Pre-compute month index for each timestep (avoids repeated linear search)
+    month_map = zeros(Int, nt)
+    for (ki, t) in enumerate(precomp.valid_ts)
+        month_map[t] = precomp.months_v[ki]
+    end
+    # Invalid timesteps default to month 1
+    for t in 1:nt
+        if month_map[t] == 0
+            month_map[t] = 1
+        end
+    end
+
+    # --- 1. WSE log-likelihood at upstream nodes ---
+    for k in 1:length(precomp.valid_ts)
+        Q_t = exp(logQ[precomp.valid_ts[k]])
+        WSE_pred = manning_wse_backwater(
+            Q_t, n, r, z0, precomp.S0, precomp.H_bc[k],
+            precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+
+        js   = precomp.upstream_j[k]
+        Hobs = precomp.upstream_H[k]
+        Wobs = precomp.upstream_W[k]
+        for idx in 1:length(js)
+            # WSE likelihood (skip if H is NaN — missing observation)
+            if !isnan(Hobs[idx])
+                residual_H = Hobs[idx] - WSE_pred[js[idx]]
+                if isinf(ν)
+                    nll += 0.5 * (residual_H / σ)^2
+                else
+                    nll += ((ν + 1) / 2) * log(1 + (residual_H / σ)^2 / ν)
+                end
+            end
+            # Width likelihood (skip if W is NaN — missing observation)
+            if use_width && !isnan(Wobs[idx])
+                # Predicted width: W_pred = Wb * (y/Yb)^(1/r)
+                y_at_node = max((WSE_pred[js[idx]] - z0 - precomp.z_ref_nodes[js[idx]]) * r / (r + 1), 0.01)
+                Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0, 0.01)
+                W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r)
+                # Use large width uncertainty to reflect model structural error
+                σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.3 * precomp.Wb_nodes[js[idx]])
+                residual_W = Wobs[idx] - W_pred
+                nll += 0.5 * (residual_W / σ_W)^2
+            end
+        end
+    end
+
+    # --- 2. Q priors (in log-Q space) ---
+    for t in 1:nt
+        q_prior = monthly_q_prior(priors, month_map[t])
+        d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+        if d isa LogNormal
+            # logQ ~ Normal(d.μ, d.σ) in log-space — exact, always finite
+            nll -= logpdf(Normal(d.μ, d.σ), logQ[t])
+        else
+            # Fallback: use safe_logpdf with Jacobian correction
+            nll -= safe_logpdf(q_prior, exp(logQ[t])) + logQ[t]
+        end
+    end
+
+    # --- 3. Static parameter priors ---
+    # n prior (in natural n-space, with Jacobian for logn parameterization)
+    nll -= safe_logpdf(priors.np, n) + logn
+
+    # r prior (in natural r-space, with Jacobian for logr parameterization)
+    nll -= safe_logpdf(priors.rp, r) + logr
+
+    # z₀ prior (natural space, no Jacobian)
+    nll -= safe_logpdf(priors.zp, z0)
+
+    # --- 4. Temporal smoothness on log-Q ---
+    for t in 2:nt
+        nll += λ_smooth * (logQ[t] - logQ[t - 1])^2
+    end
+
+    return nll
 end
 
 """
     infer(priors, reach; kwargs...) -> NamedTuple
 
-Full SAD inference pipeline for a single SWOT reach.
+SAD inference: joint MAP estimation over discharge and channel parameters
+using the analytical Manning + first-order GVF perturbation forward model.
 
-Two-stage approach:
-1. `infer_channel_params`: SIES with mean Q to estimate static hydraulic parameters [n, r, z0].
-2. `infer_discharge`: LETKF per timestep to estimate dynamic Q conditioned on the parameter posterior.
+All parameters are estimated simultaneously by minimizing a single objective
+(the negative log-joint) with L-BFGS, then Laplace approximation provides
+posterior uncertainty.
+
+# Parameter vector θ (length nt + 3)
+- `θ[1:nt]`   = log(Q_t) — discharge at each timestep
+- `θ[nt+1]`  = log(n)    — Manning roughness
+- `θ[nt+2]`  = log(r)    — Dingman shape exponent
+- `θ[nt+3]`  = z₀        — downstream bed elevation
 
 # Arguments
-- `p`:        `SWOTPriors` with prior distributions for all parameters.
-- `reach`:    `SWOTReach` with observations and reach geometry.
-- `time_str`: Optional timestamps used to select monthly discharge priors.
-- `N`:        Ensemble size (used in both stages).
-- `σₒ`:       Observation noise std [m].
-- `γ`:        SIES damping factor (stage 1).
-- `max_iter`: SIES maximum iterations (stage 1).
-- `tol`:      SIES convergence tolerance (stage 1).
-- `rho`:      LETKF covariance inflation factor (stage 2).
+- `priors`: `SWOTPriors` with prior distributions
+- `reach`:  `SWOTReach` with observations and geometry
+
+# Keyword arguments
+- `time_str`:    timestamps for monthly Q-prior selection
+- `σ_obs`:       observation error scale [m] (default `NaN`: auto-estimated from data)
+- `ν`:           Student-t d.f.; `Inf` = Gaussian (default `5.0`)
+- `λ_smooth`:    temporal smoothness weight (default `0.1`)
+- `iterations`:  max L-BFGS iterations (default 500)
+- `g_tol`:       gradient convergence tolerance (default 1e-6)
+- `S0`:          optional reach-averaged slope override
 
 # Returns
-A `NamedTuple` with:
-- `Q_post`:         `Vector{Float64}` — posterior mean Q per timestep (NaN if invalid).
-- `reach_ensemble`: `Matrix{Float64}` — 3×N posterior parameter ensemble [n, r, z0].
-- `A_post`:         per-timestep state ensemble from LETKF (or `nothing` for invalid timesteps).
-- `valid_ts`:       `Vector{Int}` — timestep indices with ≥ 2 valid observations.
-- `completeness`:   `nothing` (retained for backwards compatibility).
+`NamedTuple` with:
+- `Q_post`:  posterior mean Q per timestep (MAP estimate)
+- `Q_std`:   posterior std of Q (Laplace delta method)
+- `n_post`:  MAP Manning n
+- `r_post`:  MAP Dingman r
+- `z0_post`: MAP downstream bed elevation
+- `θ_map`:   full MAP parameter vector
+- `Σ`:       posterior covariance matrix (Laplace)
+- `result`:  Optim.jl optimization result
+- `valid_ts`: indices of valid timesteps
+- `precomp`:  `ManningPrecomp` used in inference
 """
 function infer(p::SWOTPriors, reach::SWOTReach;
                time_str::Vector{String} = String[],
-               N::Int                   = 1000,
-               σₒ::Float64              = 0.5,
-               rho::Float64             = 1.05,
-               huber_threshold::Float64 = 2.0)
-    valid_ts = findall(reach.valid)
-    if isempty(valid_ts)
-        @warn "infer: no valid timesteps — returning empty posterior"
-        return (reach_ensemble = Matrix{Float64}(undef, 3, 0),
-                Q_post         = fill(NaN, reach.nt),
-                A_post         = nothing,
-                valid_ts       = valid_ts,
-                completeness   = nothing)
-    end
-
-    # Stage 1: static channel parameters via SIES
+               σ_obs::Float64    = NaN,
+               ν::Float64        = 5.0,
+               λ_smooth::Float64 = 0.1,
+               iterations::Int   = 500,
+               g_tol::Float64   = 1e-6,
+               S0::Union{Nothing, Float64} = nothing,
+               use_width::Bool  = false)
+    # Extract months
     months = if !isempty(time_str) && p.Qp isa Vector
         map(time_str) do s
             try Month(DateTime(s)).value
@@ -168,203 +444,136 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     else
         fill(1, reach.nt)
     end
-    # pa = infer_channel_params(p, reach, months,  N, σₒ)
-    samples = rejection_sample(p, reach, months; ε_rel=0.1)
-    pa = try
-        SWOTPriors(p.Qp,
-                   UvBinnedDist(fit(Histogram, samples[1, :], range(minimum(p.np), maximum(p.np), length=10))),
-                   UvBinnedDist(fit(Histogram, samples[2, :], range(minimum(p.rp), maximum(p.rp), length=10))),
-                   UvBinnedDist(fit(Histogram, samples[3, :], range(minimum(p.zp), maximum(p.zp), length=10))))
-    catch
-        infer_channel_params(p, reach, months,  N, σₒ)
+
+    # Pre-compute reach geometry and observations
+    precomp = precompute_manning(reach, months; S0=S0)
+
+    if isempty(precomp.valid_ts)
+        @warn "infer: no valid timesteps"
+        nt = reach.nt
+        return (Q_post  = fill(NaN, nt),
+                Q_std    = fill(NaN, nt),
+                n_post   = NaN, r_post = NaN, z0_post = NaN,
+                θ_map    = fill(NaN, nt + 3),
+                Σ        = zeros(nt + 3, nt + 3),
+                result   = nothing,
+                valid_ts = Int[], precomp = precomp)
     end
 
-    # Stage 2: dynamic discharge via LETKF
-    result = infer_discharge(pa, reach;
-                             sigma_obs=σₒ, N=N, time_str=time_str, rho=rho,
-                             huber_threshold=huber_threshold)
-    reach_ens = hcat(rand(pa.np, N), rand(pa.rp, N), rand(pa.zp, N))' |> Matrix
-    return (reach_ensemble = reach_ens,
-            Q_post         = result.Q_post,
-            A_post         = result.A_post,
-            valid_ts       = valid_ts,
-            completeness   = nothing)
-end
+    # Use data-estimated σ_obs if not explicitly provided
+    σ_use = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
+    println("  σ_obs = $(round(σ_use, digits=3)) m")
 
-function infer_channel_params(p::SWOTPriors, reach::SWOTReach, months, N::Int = 1000, σₒ::Float64 = 0.5)
-    logit(u) = log(u / (1 - u))
-    logit1(u) = 1 / (1 + exp(-u))
-    zbnds = [minimum(p.zp), maximum(p.zp)]
-    nbnds = [minimum(p.np), maximum(p.np)]
-    rbnds = [minimum(p.rp), maximum(p.rp)]
-    X = zeros(3, N)
-    X[1, :] = logit.((rand(p.np, N) .- nbnds[1]) ./ (nbnds[2] - nbnds[1]))
-    X[2, :] = logit.((rand(p.rp, N) .- rbnds[1]) ./ (rbnds[2] - rbnds[1]))
-    X[3, :] = logit.((rand(p.zp, N) .- zbnds[1]) ./ (zbnds[2] - zbnds[1]))
+    # Initialize from prior medians
+    θ0 = initialize_theta(p, precomp)
 
-    rep_ts = select_representative_timesteps(reach; n_bins=5)
-    obs_per_t = map(rep_ts) do t
-        good = findall(.!ismissing.(reach.obs.H[:, t]))
-        (x = collect(reach.obs.x[good]),
-         H = Float64.(reach.obs.H[good, t]),
-         H_bc = reach.H[1, t],
-         month = months[t])
-    end
-    d = vcat([o.H[2:end] for o in obs_per_t]...)
-    HX = zeros(length(d), N)
-    valid_ens = fill(true, N)
-    for e in 1:N
-        row = 1
-        for o in obs_per_t
-            Qp_t = monthly_q_prior(p, o.month)
-            Q_t = mean(Qp_t.untruncated)
-            n_e = nbnds[1] + (nbnds[2] - nbnds[1]) * logit1(X[1, e])
-            r_e = exp(X[2, e]) + rbnds[1]
-            z0_e = zbnds[1] + (zbnds[2] - zbnds[1]) * logit1(X[3, e])
-            pred = gvf_solve(Q_t, n_e, r_e, z0_e, o.H_bc, reach;
-                             saveat=o.x)
-            if isnothing(pred) || !all(isfinite.(pred))
-                HX[row:row+length(o.H)-2, e] .= NaN
-                valid_ens[e] = false
-            else
-                HX[row:row+length(o.H)-2, e] = pred[2:end]
-            end
-            row += length(o.H) - 1
-        end
+    # Objective closure
+    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_smooth, use_width=use_width)
+
+    # In-place gradient via ForwardDiff
+    function g!(G, θ)
+        G .= ForwardDiff.gradient(obj, θ)
     end
 
-    # d = mean.(skipmissing.(eachrow(reach.obs.H)))
-    valid_obs = any.(.!ismissing.(eachcol(reach.obs.H))) |> sum
-    # nobs = length(d)
-    # qm = p.Qp isa Vector ? mean([mean(qp.untruncated) for qp in p.Qp]) : mean(p.Qp.untruncated)
-    # HX = zeros(nobs-1, N)
-    # valid_ens = fill(true, N)
-    # for e in 1:N
-    #     n_e = X[1, e]
-    #     r_e = X[2, e]
-    #     z0_e = zbnds[1] + (zbnds[2] - zbnds[1]) * logit1(X[3, e])
-    #     a_e = X[4, e]
-    #     pred = gvf_solve(qm, n_e, r_e, a_e, z0_e, d[1], reach; saveat=reach.obs.x)
-    #     if isnothing(pred) || !all(isfinite.(pred))
-    #         valid_ens[e] = false
-    #         continue
-    #     end
-    #     HX[:, e] = pred[2:end]
-    # end
-    good_idx = findall(valid_ens)
-    HX = HX[:, good_idx]
-    X = X[:, good_idx]
+    # L-BFGS optimization
+    result = optimize(obj, g!, θ0, LBFGS(),
+                      Optim.Options(iterations=iterations,
+                                     g_tol=g_tol,
+                                     allow_f_increases=true,
+                                     show_trace=false))
 
-    R = fill(σₒ / sqrt(valid_obs), length(d[2:end])).^2
-    Xa = letkf(X, d[2:end], HX, R)
-    n_est = nbnds[1] .+ (nbnds[2] - nbnds[1]) .* logit1.(Xa[1, :])
-    r_est = rbnds[1] .+ (rbnds[2] - rbnds[1]) .* logit1.(Xa[2, :])
-    z_est = zbnds[1] .+ (zbnds[2] - zbnds[1]) .* logit1.(Xa[3, :])
-    return SWOTPriors(p.Qp,
-                      Uniform(mean(n_est) - max(std(n_est), 0.001), mean(n_est) + max(std(n_est), 0.001)),
-                      truncated(Normal(mean(r_est), max(std(r_est), 0.2)), rbnds[1], rbnds[2]),
-                      truncated(Normal(mean(z_est), max(std(z_est), 0.2)), zbnds[1], zbnds[2]))
+    θ_map = Optim.minimizer(result)
+
+    # Extract physical parameters
+    nt = reach.nt
+    Q_post  = exp.(θ_map[1:nt])
+    n_post  = exp(θ_map[nt + 1])
+    r_post  = exp(θ_map[nt + 2])
+    z0_post = θ_map[nt + 3]
+
+    # Laplace uncertainty
+    Σ = laplace_uncertainty(obj, θ_map)
+    # Q_std via delta method: σ_Q ≈ Q · σ_{logQ}
+    Q_std = Q_post .* sqrt.(diag(Σ)[1:nt])
+
+    return (Q_post  = Q_post,
+            Q_std   = Q_std,
+            n_post  = n_post,
+            r_post  = r_post,
+            z0_post = z0_post,
+            θ_map   = θ_map,
+            Σ       = Σ,
+            result  = result,
+            valid_ts = precomp.valid_ts,
+            precomp  = precomp)
 end
 
 """
-    infer_discharge(p, reach; kwargs...) -> NamedTuple
+    initialize_theta(priors, precomp) -> Vector{Float64}
 
-Stage-2 LETKF discharge inference. For each valid timestep, samples hydraulic
-parameters from `p`'s parameter distributions (typically posterior empirical
-distributions from `infer_channel_params`) and draws Q from the (monthly) prior,
-then runs the LETKF update against observed WSE.
+Construct initial parameter vector θ₀ from prior medians.
+
+For Q, uses a physics-informed estimate: given prior-medians for n, r, z₀,
+estimates mean depth from the first valid timestep's observations, then
+computes Q via Manning's equation. Falls back to the prior median if the
+estimate is infeasible.
+"""
+function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp)
+    nt = precomp.nt
+
+    # Static parameters from prior medians
+    n_init = quantile(p.np, 0.5)
+    r_init = quantile(p.rp, 0.5)
+    z0_init = quantile(p.zp, 0.5)
+
+    # Initialize Q from monthly prior medians (more robust than depth-based
+    # estimation, especially for noisy reaches where observed WSE gives
+    # unreliable depth estimates)
+    logQ_init = fill(0.0, nt)
+    for t in 1:nt
+        ki = findfirst(==(t), precomp.valid_ts)
+        mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+        q_prior = monthly_q_prior(p, mo)
+        q_median = quantile(q_prior, 0.5)
+        logQ_init[t] = log(max(q_median, 0.01))
+    end
+
+    return vcat(logQ_init, log(n_init), log(r_init), z0_init)
+end
+
+"""
+    laplace_uncertainty(obj, θ_map) -> Matrix
+
+Compute the Laplace approximation to the posterior covariance by inverting
+the Hessian of the negative log-joint at the MAP estimate.
+
+Σ = H⁻¹ where H = ∇² neg_log_joint(θ_map)
+
+The Hessian is computed via ForwardDiff. If the inverse is not positive
+definite (due to numerical issues), a small diagonal regularization is added.
 
 # Arguments
-- `p`:     `SWOTPriors` — parameter distributions (may be posterior from stage 1).
-- `reach`: `SWOTReach`.
-
-# Keyword arguments
-- `sigma_obs`: Observation noise std [m] (default 0.1).
-- `N`:         Ensemble size per timestep (default 500).
-- `time_str`:  Timestamps for monthly prior selection.
-- `rho`:       LETKF covariance inflation factor (default 1.05).
+- `obj`:   scalar objective function f(θ) → neg_log_joint
+- `θ_map`: MAP parameter vector
 
 # Returns
-`NamedTuple` with `Q_post` (length nt) and `A_post` (per-timestep state ensemble).
+Posterior covariance matrix Σ of size (length(θ_map) × length(θ_map)).
 """
-function infer_discharge(p::SWOTPriors, reach::SWOTReach;
-                         sigma_obs::Float64       = 0.5,
-                         N::Int                   = 1000,
-                         time_str::Vector{String} = String[],
-                         rho::Float64             = 1.05,
-                         huber_threshold::Float64 = 2.0)
-    months = if !isempty(time_str) && p.Qp isa Vector
-        map(time_str) do s
-            try Month(DateTime(s)).value
-            catch; 1
-            end
+function laplace_uncertainty(obj, θ_map::AbstractVector)
+    H = ForwardDiff.hessian(obj, θ_map)
+    # Symmetrize (ForwardDiff hessian should already be symmetric,
+    # but machine precision may cause slight asymmetry)
+    H = Symmetric(H)
+    try
+        Σ = inv(H)
+        # Check for negative variances (indicates non-convexity at MAP)
+        if any(diag(Σ) .< 0)
+            @warn "laplace_uncertainty: negative diagonal detected, adding regularization"
+            Σ = inv(H + 1e-4 * I)
         end
-    else
-        fill(1, reach.nt)
+        return Matrix(Σ)
+    catch e
+        @warn "laplace_uncertainty: Hessian inversion failed" exception=e
+        return zeros(length(θ_map), length(θ_map))
     end
-    if sum(reach.valid) == 0
-        @warn "No valid timesteps: returning empty posterior"
-        return (Q_post = fill(NaN, reach.nt),
-                A_post = Vector{Union{Nothing, Matrix{Float64}}}(nothing, reach.nt))
-    end
-    nt     = reach.nt
-    Q_post = fill(NaN, nt)
-    A_post = Vector{Union{Nothing, Matrix{Float64}}}(nothing, nt)
-    valid_ts = findall(reach.valid)
-    n_est = mean(p.np)
-    r_est = mean(p.rp)
-    z0_est = mean(p.zp)
-    n_ens = rand(p.np, N)
-    r_ens = rand(p.rp, N)
-    z0_ens = rand(p.zp, N)
-    @showprogress "Timesteps" for t in valid_ts
-        Q_ens  = rand(monthly_q_prior(p, months[t]), N)
-        # A    = reshape(Q_ens, 1, N)
-        A    = reshape(log.(Q_ens), 1, N)
-        H_bc = reach.H[1, t]
-        good = findall(.!ismissing.(reach.obs.H[:, t]))
-        if length(good) < 2
-            @warn "Skipping timestep $t: fewer than 2 observations"
-            continue
-        end
-        d = Float64.(reach.obs.H[good, t])
-        x_obs = collect(reach.obs.x[good])
-        n_q   = length(Q_ens)
-        HA = zeros(length(d), n_q)
-        good_ens = Int[]
-        for k in 1:n_q
-            pred = gvf_solve(exp(A[1, k]), n_ens[k], r_ens[k], z0_ens[k], H_bc, reach; saveat=x_obs)
-            if !isnothing(pred) && all(isfinite.(pred))
-                z_saveat = z0_ens[k] .+ reach.z.(x_obs)
-                HA[:, k] = compute_wse.(pred, z_saveat, r_ens[k])
-                push!(good_ens, k)
-            end
-        end
-        if length(good_ens) < 2
-            @warn "Skipping timestep $t: fewer than 2 valid ensemble members"
-            continue
-        end
-        A_filt  = A[:, good_ens]
-        HA_filt = HA[:, good_ens]
-        sigma_node = fill(sigma_obs, length(d)-1)
-        R_diag = sigma_node .^ 2
-        A_analysis = letkf(A_filt, d[2:end], HA_filt[2:end, :], R_diag; ρ=rho, huber_threshold=huber_threshold)
-        Qp_t = monthly_q_prior(p, months[t])
-        Q_lo = quantile(Qp_t, 0.001)
-        Q_hi = quantile(Qp_t, 0.999)
-        Q_post_ens = clamp.(exp.(A_analysis[1, :]), Q_lo, Q_hi)
-        # Q_post_ens = clamp.(A_analysis[1, :], Q_lo, Q_hi)
-        if !all(isfinite.(Q_post_ens))
-            @warn "Timestep $t: non-finite Q after exponentiation — skipping"
-            continue
-        end
-        Q_post[t] = median(Q_post_ens)
-        A_natural      = copy(A_analysis)
-        A_natural[1,:] = Q_post_ens
-        A_post[t]      = A_natural
-    end
-    return (
-        Q_post         = Q_post,
-        A_post = A_post,
-    )
 end
