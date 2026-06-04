@@ -22,7 +22,20 @@ For distributions with unbounded support (Normal, LogNormal, etc.), `logpdf`
 is returned unchanged.
 """
 function safe_logpdf(d, x)
-    if d isa Uniform
+    if x <= 0 && (d isa LogNormal || (d isa Truncated && d.untruncated isa LogNormal))
+        # LogNormal has support (0, ∞). For x ≤ 0, logpdf returns -Inf which
+        # crashes ForwardDiff. Add a smooth log-barrier that blows up as x → 0
+        # and provides a strong gradient back toward positivity.
+        # At x = 0.01 (well inside the support), the barrier penalty is negligible.
+        lp = if d isa LogNormal
+            logpdf(d, max(x, 0.01))  # evaluate at floor
+        else
+            safe_logpdf(d.untruncated, max(x, 0.01))
+        end
+        # Quadratic barrier below 0: penalize exponentially as x → 0⁻
+        lp -= 0.5 * (0.01 / max(-x, 1e-10))^2
+        return lp
+    elseif d isa Uniform
         # Replace Uniform(μ, σ) → Normal(mean, std) matching first two moments
         μ_u = (minimum(d) + maximum(d)) / 2
         σ_u = (maximum(d) - minimum(d)) / (2 * sqrt(3))
@@ -85,6 +98,7 @@ struct ManningPrecomp
     σ_obs_est::Float64  # automatically estimated WSE observation noise [m]
     upstream_W::Vector{Vector{Float64}}  # observed width at upstream nodes
     σ_W_est::Float64    # automatically estimated width observation noise [m]
+    q_scale::Vector{Float64}  # per-timestep prior median Q, used to scale θ→Q
 end
 
 """
@@ -100,7 +114,8 @@ forward model. Call once before optimization.
             `mean(reach.S0.(reach.x))`
 """
 function precompute_manning(reach::SWOTReach, months::Vector{Int};
-                            S0::Union{Nothing, Float64} = nothing)
+                            S0::Union{Nothing, Float64} = nothing,
+                            priors::Union{Nothing, SWOTPriors} = nothing)
     x_nodes    = collect(reach.obs.x)
     Wb_nodes   = reach.wbf.(x_nodes)
     hbf_nodes  = reach.hbf.(x_nodes)
@@ -165,9 +180,23 @@ function precompute_manning(reach::SWOTReach, months::Vector{Int};
     # Estimate width observation noise from the data
     σ_W_est = estimate_σ_W(upstream_W)
 
+    # Per-timestep prior median Q for scaling the parameter vector.
+    # θ[1:nt] = Q_t / q_scale[t], so that θ ≈ 1 near the prior, giving
+    # well-conditioned L-BFGS optimization.  Without scaling, Q values span
+    # several orders of magnitude (5–3500 m³/s), causing line search failures.
+    q_scale = fill(1.0, nt)  # default: no scaling
+    if !isnothing(priors)
+        for t in 1:nt
+            ki = findfirst(==(t), valid_ts)
+            mo = isnothing(ki) ? 1 : months_v[ki]
+            q_med = quantile(monthly_q_prior(priors, mo), 0.5)
+            q_scale[t] = max(q_med, 0.1)
+        end
+    end
+
     ManningPrecomp(x_nodes, Wb_nodes, hbf_z_nodes, z_ref_nodes, S0_val, nt,
                    valid_ts, H_bc_list, upstream_j, upstream_H, months_v, σ_obs_final,
-                   upstream_W, σ_W_est)
+                   upstream_W, σ_W_est, q_scale)
 end
 
 """
@@ -280,9 +309,9 @@ The parameter vector θ encodes:
 The objective comprises four terms:
 1. **WSE likelihood**: Student-t (ν < ∞) or Gaussian (ν = Inf) per-node
    residuals between predicted and observed WSE at upstream nodes (j ≥ 2).
-2. **Q priors**: monthly climatological log-normal priors in log-Q space.
+2. **Q priors**: monthly climatological log-normal priors in Q-space.
 3. **Static priors**: on n, r, z₀ from the SoS database.
-4. **Temporal smoothness**: penalty on successive log-Q differences.
+4. **Temporal smoothness**: penalty on successive Q differences.
 
 # Arguments
 - `θ`:        parameter vector of length `nt + 3`
@@ -292,13 +321,16 @@ The objective comprises four terms:
 # Keyword arguments
 - `σ_obs`:     observation error scale [m] (default `NaN`: auto-estimated from data)
 - `ν`:         Student-t degrees of freedom; `Inf` = Gaussian (default `5.0`)
-- `λ_smooth`:  temporal smoothness weight on log-Q (default `0.0`, disabled)
+- `λ_smooth`:  temporal smoothness weight on Q (default `0.0`, disabled)
 
 # Returns
 Scalar negative log-joint value. Minimized by `infer`.
 
 # Conventions (see AGENTS.md)
-- Q and n are estimated in log-space to enforce positivity and improve conditioning.
+- θ[1:nt] stores Q in scaled natural space: θ[t] = Q_t / q_scale[t], where
+  q_scale is the monthly prior median. This normalizes Q to ≈1 near the prior,
+  giving well-conditioned L-BFGS optimization while keeping Q in natural space.
+- n and r are estimated in log-space to enforce positivity.
 - z₀ is in natural space (can be negative).
 - The downstream boundary WSE (H_bc, node j=1) is an INPUT to the forward model,
   not an observation; the likelihood applies at nodes j ≥ 2 only.
@@ -312,7 +344,9 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # Auto-select σ_obs from estimated noise if not provided
     σ = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
     nt = precomp.nt
-    logQ = view(θ, 1:nt)
+    # θ[1:nt] stores Q in scaled natural space: θ[t] = Q_t / q_scale[t].
+    # The per-timestep q_scale (prior median) normalizes Q values to ≈1,
+    # giving well-conditioned L-BFGS optimization while keeping Q in natural space.
     logn = θ[nt + 1]
     logr = θ[nt + 2]
     z0   = θ[nt + 3]
@@ -339,7 +373,7 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
 
     # --- 1. WSE log-likelihood at upstream nodes ---
     for k in 1:length(precomp.valid_ts)
-        Q_t = exp(logQ[precomp.valid_ts[k]])
+        Q_t = max(θ[precomp.valid_ts[k]] * precomp.q_scale[precomp.valid_ts[k]], 0.01)  # unscale + enforce positivity
         WSE_pred = manning_wse_backwater(
             Q_t, n, r, z0, precomp.S0, precomp.H_bc[k],
             precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
@@ -374,17 +408,11 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
         end
     end
 
-    # --- 2. Q priors (in log-Q space) ---
+    # --- 2. Q priors (in Q-space) ---
     for t in 1:nt
         q_prior = monthly_q_prior(priors, month_map[t])
-        d = q_prior isa Truncated ? q_prior.untruncated : q_prior
-        if d isa LogNormal
-            # logQ ~ Normal(d.μ, d.σ) in log-space — exact, always finite
-            nll -= logpdf(Normal(d.μ, d.σ), logQ[t])
-        else
-            # Fallback: use safe_logpdf with Jacobian correction
-            nll -= safe_logpdf(q_prior, exp(logQ[t])) + logQ[t]
-        end
+        q_val = max(θ[t] * precomp.q_scale[t], 0.01)  # unscale
+        nll -= safe_logpdf(q_prior, q_val)
     end
 
     # --- 3. Static parameter priors ---
@@ -397,9 +425,11 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # z₀ prior (natural space, no Jacobian)
     nll -= safe_logpdf(priors.zp, z0)
 
-    # --- 4. Temporal smoothness on log-Q ---
+    # --- 4. Temporal smoothness on Q ---
     for t in 2:nt
-        nll += λ_smooth * (logQ[t] - logQ[t - 1])^2
+        Qt  = θ[t]   * precomp.q_scale[t]
+        Qt1 = θ[t-1] * precomp.q_scale[t-1]
+        nll += λ_smooth * (Qt - Qt1)^2
     end
 
     return nll
@@ -416,10 +446,10 @@ All parameters are estimated simultaneously by minimizing a single objective
 posterior uncertainty.
 
 # Parameter vector θ (length nt + 3)
-- `θ[1:nt]`   = log(Q_t) — discharge at each timestep
-- `θ[nt+1]`  = log(n)    — Manning roughness
-- `θ[nt+2]`  = log(r)    — Dingman shape exponent
-- `θ[nt+3]`  = z₀        — downstream bed elevation
+- `θ[1:nt]`   = Q_t / q_scale[t] — discharge in scaled natural space
+- `θ[nt+1]`  = log(n)          — Manning roughness
+- `θ[nt+2]`  = log(r)          — Dingman shape exponent
+- `θ[nt+3]`  = z₀              — downstream bed elevation
 
 # Arguments
 - `priors`: `SWOTPriors` with prior distributions
@@ -468,7 +498,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     end
 
     # Pre-compute reach geometry and observations
-    precomp = precompute_manning(reach, months; S0=S0)
+    precomp = precompute_manning(reach, months; S0=S0, priors=p)
 
     if isempty(precomp.valid_ts)
         @warn "infer: no valid timesteps"
@@ -574,7 +604,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     n_outside_prior = n_post_check > 0.10
 
     # Quick Q sanity check: are estimated Q values wildly outside the prior?
-    Q_check = exp.(Optim.minimizer(result)[1:nt])
+    Q_check = max.(Optim.minimizer(result)[1:nt] .* precomp.q_scale, 0.01)
     q_prior_medians = Float64[]
     for t in 1:nt
         ki = findfirst(==(t), precomp.valid_ts)
@@ -605,7 +635,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                         r_post_check <= r_hi &&
                         z0_lo <= z0_post_check <= z0_hi
             # Re-check Q sanity with updated parameters
-            Q_retry = exp.(Optim.minimizer(result)[1:nt])
+            Q_retry = max.(Optim.minimizer(result)[1:nt] .* precomp.q_scale, 0.01)
             q_spike_retry = any(Q_retry .> 10.0 .* q_prior_medians)
             n_outside_prior_retry = n_post_check > 0.10
             if physical && !n_outside_prior_retry && !q_spike_retry
@@ -616,7 +646,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     end
 
     # Final check: are the parameters still unphysical or producing spikes after retries?
-    Q_final = exp.(Optim.minimizer(result)[1:nt])
+    Q_final = max.(Optim.minimizer(result)[1:nt] .* precomp.q_scale, 0.01)
     q_spike_final = any(Q_final .> 10.0 .* q_prior_medians)
     final_physical = n_lo <= n_post_check <= n_hi &&
                       r_post_check <= r_hi &&
@@ -646,7 +676,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     θ_map = Optim.minimizer(result)
 
     # Extract physical parameters
-    Q_post  = exp.(θ_map[1:nt])
+    Q_post  = max.(θ_map[1:nt] .* precomp.q_scale, 0.01)
     n_post  = exp(θ_map[nt + 1])
     r_post  = exp(θ_map[nt + 2])
     z0_post = θ_map[nt + 3]
@@ -654,8 +684,8 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     # Laplace uncertainty (use the final objective with the correct σ_obs)
     final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
     Σ = laplace_uncertainty(final_obj, θ_map)
-    # Q_std via delta method: σ_Q ≈ Q · σ_{logQ}
-    Q_std = Q_post .* sqrt.(diag(Σ)[1:nt])
+    # Q_std from posterior covariance, scaled back to natural Q-space
+    Q_std = sqrt.(abs.(diag(Σ)[1:nt])) .* precomp.q_scale
 
     return (Q_post  = Q_post,
             Q_std   = Q_std,
@@ -811,7 +841,8 @@ end
 
 Construct initial parameter vector θ₀ from prior medians.
 
-For Q, uses monthly climatological log-normal prior medians in log-Q space.
+For Q, uses monthly climatological prior medians scaled by `q_scale` so that
+θ ≈ 1 near the prior, giving well-conditioned L-BFGS optimization.
 The `months` vector (length nt) maps each timestep to its calendar month,
 allowing correct seasonal initialization even for unobserved timesteps.
 """
@@ -824,18 +855,16 @@ function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp,
     r_init = quantile(p.rp, 0.5)
     z0_init = quantile(p.zp, 0.5)
 
-    # Initialize Q from monthly prior medians using the correct calendar month
-    # for each timestep. Previously, unobserved timesteps fell back to month 1,
-    # which flattened the seasonal cycle for data-sparse reaches.
-    logQ_init = fill(0.0, nt)
+    # Initialize Q in scaled natural space: θ[t] = Q_t / q_scale[t]
+    Q_init = fill(0.0, nt)
     for t in 1:nt
         mo = months[t]
         q_prior = monthly_q_prior(p, mo)
         q_median = quantile(q_prior, 0.5)
-        logQ_init[t] = log(max(q_median, 0.01))
+        Q_init[t] = max(q_median, 0.01) / precomp.q_scale[t]
     end
 
-    return vcat(logQ_init, log(n_init), log(r_init), z0_init)
+    return vcat(Q_init, log(n_init), log(r_init), z0_init)
 end
 
 """

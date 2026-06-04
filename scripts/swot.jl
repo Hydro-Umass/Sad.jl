@@ -164,7 +164,7 @@ Main driver routine for SAD v2 discharge estimation.
 - `λ_smooth`:    temporal smoothness weight (default 0.1)
 - `iterations`:  max L-BFGS iterations (default 500)
 - `g_tol`:       gradient convergence tolerance (default 1e-6)
-- `use_width`:   use width observations in likelihood (default true)
+- `use_width`:   use width observations in likelihood (default false)
 """
 function main(reachid, swordfile, sosfile, swotfile, outdir;
               σ_obs::Float64     = NaN,
@@ -172,7 +172,7 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
               λ_smooth::Float64  = 0.1,
               iterations::Int    = 500,
               g_tol::Float64     = 1e-6,
-              use_width::Bool    = true)
+              use_width::Bool    = false)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
