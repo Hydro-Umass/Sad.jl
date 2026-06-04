@@ -1,136 +1,164 @@
 # Use cases
 
 !!! warning "Array ordering in SAD"
-	`SAD` expects time series of hydraulic variable profiles as 2-D arrays, with the row dimension being the cross-sections from downstream (index 1) to upstream (last index) and the column dimension being time. The time for each column does not have to be continuous, as `SAD` operates on each one separately. Missing data are acceptable, but do use [Julia's missing data type](https://docs.julialang.org/en/v1/manual/missing/) instead of `NaN`.
+    SAD expects time series of hydraulic variable profiles as 2-D arrays, with
+    the **row dimension** being the cross-sections from **downstream (index 1) to
+    upstream (last index)** and the column dimension being time. Missing data are
+    acceptable — use [Julia's `missing` type](https://docs.julialang.org/en/v1/manual/missing/)
+    rather than `NaN`.
 
+## Basic usage with synthetic data (Pepsi)
 
-## Pepsi-1 experiment
-
-We start by loading the data, including river node information and synthetic SWOT observations
+Load a river reach from a NetCDF file and preprocess the SWOT observations:
 
 ```julia
-using NCDatasets, Statistics, Distributions, Sad
-f = Dataset("../../data/pepsi1/Po.nc")
+using NCDatasets, Statistics, Sad
+
+f = Dataset("data/pepsi1/Po.nc")
 g = NCDatasets.group(f, "XS_Timeseries")
-qwbm = NCDatasets.group(f, "River_Info")["QWBM"][1]
+qwbm = Float64(NCDatasets.group(f, "River_Info")["QWBM"][1])
 x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
-Q = g["Q"][:][end:-1:1, :]
-H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
-W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
-```
+H = convert(Matrix{Sad.FloatM}, g["H"][end:-1:1, :])
+W = convert(Matrix{Sad.FloatM}, g["W"][end:-1:1, :])
 
-Bankfull width and water surface elevation can be guessed as the maximum from the observed time series, while an initial estimate of bed slope can be obtained from the mean of surface water slope
-
-```julia
-wbf = maximum.(skipmissing.(eachrow(W)))
-hbf = maximum.(skipmissing.(eachrow(H)))
+# Compute slope from WSE
 S = diff(H, dims=1) ./ diff(x)
-S = [S[1, :]'; S]
-S0 = mean(S, dims=2)[:, 1]
-S = convert(Matrix{Sad.FloatM}, S)
+S = convert(Matrix{Sad.FloatM}, vcat(S[1:1, :], S))
+
+# Preprocess observations into a SWOTReach
+reach = Sad.preprocess(x, H, W, S)
 ```
 
-Then we can derive the prior distributions using rejection sampling from uninformative priors
+Construct priors. When SoS data is available, monthly Q priors are automatically
+constructed:
 
 ```julia
-Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(H[1, :]), Sad.sinuous)
-Qp, np, rp, zp = Sad.rejection_sampling(Qp0, np0, rp0, zp0, x, H, S0, wbf, hbf, 100, 1000)
+# From SoS database (recommended)
+sosfile = "data/sos/na_sword_v17_SOS_priors.nc"
+p = Sad.priors(sosfile, reach.hmin, reachid; S0=mean(reach.S0.(reach.x)))
 ```
 
-The ensemble of discharge, roughness coefficient, channel shape parameter and bed elevation can now be generated
+When SoS data is unavailable, construct uninformative priors from the basin
+mean discharge and river planform class:
 
 ```julia
-Qe, ne, re, ze = Sad.prior_ensemble(x, Qp, np, rp, zp, 100);
+# Uninformative priors
+p = Sad.priors(qwbm, reach.hmin, Sad.sinuous; reach=reach)
 ```
 
-Bed elevation and slope are then estimated by assimilating the time-average water surface elevation profile
+Run SAD v2 inference:
 
 ```julia
-Se = Sad.bathymetry!(ze, S, S0, Qe, ne, re, x, hbf, wbf, mean.(skipmissing.(eachrow(H))))
-zp = truncated(Normal(mean(ze[1, :]), 1e-3), -Inf, minimum(H[1, :]))
-Sa = mean(Se, dims=2)[:, 1]
+# With monthly Q priors from observation timestamps
+time_str = ["2023-01-15", "2023-02-12", ...]  # one per timestep
+result = Sad.infer(p, reach; time_str=time_str)
 ```
 
-and finally we assimilate the observed water surface elevation to estimate discharge and flow parameters, which include roughness coefficient and minimum cross-sectional area
+Or with explicit keyword arguments for advanced control:
 
 ```julia
-Qa, Qu, na = Sad.assimilate(H, W, S, x, wbf, hbf, Sa, Qp, np, rp, zp, 100)
+result = Sad.infer(p, reach;
+    time_str    = time_str,     # timestamps for monthly Q-prior selection
+    σ_obs       = NaN,          # NaN = auto-estimate from data
+    ν           = 5.0,         # Student-t degrees of freedom (Inf = Gaussian)
+    λ_smooth    = 0.1,          # temporal smoothness weight on log-Q
+    iterations  = 500,          # max L-BFGS iterations
+    g_tol       = 1e-6,         # gradient convergence tolerance
+    use_width   = false,        # include width likelihood
+)
 ```
 
-![po](./assets/po.png)
+The result is a `NamedTuple` with:
 
-## Pepsi-2 experiment
+| Field | Type | Description |
+|-------|------|-------------|
+| `Q_post` | `Vector{Float64}` | Posterior mean Q per timestep (MAP) |
+| `Q_std` | `Vector{Float64}` | Posterior std of Q (Laplace delta method) |
+| `n_post` | `Float64` | MAP Manning n |
+| `r_post` | `Float64` | MAP Dingman r |
+| `z0_post` | `Float64` | MAP downstream bed elevation |
+| `θ_map` | `Vector{Float64}` | Full MAP parameter vector |
+| `Σ` | `Matrix{Float64}` | Posterior covariance (Laplace) |
+| `result` | `Optim.OptimResult` | Optimization result |
+| `valid_ts` | `Vector{Int}` | Indices of valid timesteps |
+| `precomp` | `ManningPrecomp` | Pre-computed data |
+| `fallback` | `Bool` | Whether prior+WSE anomaly fallback was used |
 
-The Pepsi-2 experiment added more river case studies as well as more realistic synthetic SWOT observations with partial reach coverage and observation errors. Most of the code described above for the [Pepsi-1 experiment](@ref) is contained within the `Sad.estimate` function. We start by loading the data
+### Extracting and plotting results
 
 ```julia
-using NCDatasets, Statistics, Distributions, Sad
-f = Dataset("../../data/pepsi2/phase3/ArialKhan.nc")
-g = NCDatasets.group(f, "XS_Timeseries")
-qwbm = NCDatasets.group(f, "River_Info")["QWBM"][1]
-x = (g["X"][:][end] .- g["X"][:])[end:-1:1, 1]
-Q = g["Q"][:][end:-1:1, :]
-H = convert(Matrix{Sad.FloatM}, g["H"][:][end:-1:1, :])
-W = convert(Matrix{Sad.FloatM}, g["W"][:][end:-1:1, :])
+# Discharge time series
+Q = result.Q_post
+Q_lo = result.Q_post .- 1.96 .* result.Q_std
+Q_hi = result.Q_post .+ 1.96 .* result.Q_std
+
+# Physical parameters
+println("Manning n = $(round(result.n_post, digits=4))")
+println("Dingman r = $(round(result.r_post, digits=2))")
+println("Bed elevation z₀ = $(round(result.z0_post, digits=2)) m")
+
+# Check if fallback was used
+if result.fallback
+    @warn "Prior + WSE anomaly fallback was used (n likely exceeded prior truncation)"
+end
 ```
 
-The `Sad.FloatM` is an alias to `Union(Missing, Float64)` type to be able to handle missing data.
+## Confluence: operational SWOT processing
+
+When running SAD within the Confluence framework, priors are obtained from the
+SWORD network database and SoS priors file:
 
 ```julia
-H[H .== -9999.0] .= missing
-W[W .== -9999.0] .= missing
+swordfile = "data/sword/na_sword_v17.nc"
+sosfile   = "data/sos/na_sword_v17_SOS_priors.nc"
+swotfile  = "data/swot/74267400111_SWOT.nc"
+
+# Read SWOT observations
+nids, x = Sad.river_info(reachid, swordfile)
+H, W, S, dA, Hr, Wr, Sr, time_str = Sad.read_swot_obs(swotfile, nids)
+H, W, S = Sad.drop_unobserved(H, W, S)  # remove fully-missing nodes
+
+# Preprocess and build priors
+reach = Sad.preprocess(x, H, W, S)
+p = Sad.priors(sosfile, reach.hmin, reachid; S0=mean(reach.S0.(reach.x)))
+
+# Run inference with monthly priors
+result = Sad.infer(p, reach; time_str=time_str)
 ```
 
-The water surface elevations for a SWOT satellite overpass are shown in the figure below
-![overpass](./assets/arial_h.png)
+## Handling small rivers and σ_obs failures
 
-We will get the prior distributions and calculate surface water slopes
+For small rivers where the auto-estimated σ_obs is much smaller than the model
+structural error, the σ_obs retry mechanism automatically doubles σ_obs until
+convergence. No user intervention is needed — the retry logic is built into
+`infer`.
+
+However, you may want to override σ_obs manually for debugging:
 
 ```julia
-Qp0, np0, rp0, zp0 = Sad.priors(qwbm, minimum(skipmissing(H[1, :])), Sad.braided)
-S = diff(H, dims=1) ./ diff(x)
-S = [S[1, :]'; S]
+# Force a specific σ_obs (meters)
+result = Sad.infer(p, reach; σ_obs=2.0)
+
+# Disable temporal smoothness
+result = Sad.infer(p, reach; λ_smooth=0.0)
+
+# Use Gaussian likelihood instead of Student-t
+result = Sad.infer(p, reach; ν=Inf)
 ```
 
-and then estimate discharge and flow parameters
+## Missing data handling
+
+SAD v2 handles missing SWOT observations gracefully. In the observation matrix,
+use `missing` values for missing data:
 
 ```julia
-Qa, Qu, A0, n = Sad.estimate(x, H, W, S, Qp0, np0, rp0, zp0, 100, 1000)
+using Sad
+H = convert(Matrix{Sad.FloatM}, H_raw)  # FloatM = Union{Missing, Float64}
+W = convert(Matrix{Sad.FloatM}, W_raw)
 ```
 
-![arial](./assets/arial_q.png)
-
-## Confluence
-
-`Confluence` is the framework that will be operationally implementing the multiple discharge estimation algorithms (SAD being one of them) for SWOT. The priors are obtained from [SWORD](https://zenodo.org/record/7410433#.Y7F7-bLMJQI)
-
-We start by setting the necessary file names and reading the river reach information
-```julia
-swordfile = "../../data/sword/na_sword_v14.nc"
-sosfile = "../../data/sos/na_sword_v11_SOS_priors_dylan.nc"
-reachid = 74267400111
-nids, x = river_info(reachid, swordfile)
-```
-
-Then we read the SWOT observations and remove any cross sections that do not have any valid observations
-
-```julia
-swotfile = "../../data/swot/$(reachid)_SWOT.nc"
-H, W, S, dA, Hr, Wr, Sr = read_swot_obs(swotfile, nids)
-x, H, W, S = Sad.drop_unobserved(x, H, W, S)
-```
-
-The priors are estimated next
-
-```julia
-Hmin = minimum(skipmissing(H[1, :]))
-Qp, np, rp, zp = Sad.priors(sosfile, Hmin, reachid)
-```
-
-Finally, we estimate discharge and the flow parameters
-
-```julia
-nens = 100
-nsamples = 1000
-Qa, Qu, A0, n = Sad.estimate(x, H, W, S, dA, Qp, np, rp, zp, nens, nsamples)
-```
+During preprocessing, nodes with no valid observations across all timesteps are
+removed via `drop_unobserved`. During inference, the likelihood automatically
+skips nodes with missing WSE or width observations. Timesteps with fewer than
+2 valid WSE observations are flagged as invalid and excluded from the MAP
+objective.

@@ -1,63 +1,231 @@
 # Algorithm
 
-The SAD algorithm operates on the set of SWOT observables (i.e., WSE, width, and slope) and derives an estimate of river discharge and its associated uncertainty using a data assimilation scheme. The assimilation scheme involves the "first-guess" estimation of hydraulic variables by combining a forward model with a set of prior probability distributions before assimilating the SWOT observations. The priors are either acquired from the [SWORD](https://zenodo.org/record/3898570) a-priori database or are derived using a data-driven approach (rejection sampling).
+SAD v2 estimates river discharge from SWOT observations (water surface elevation,
+width, and slope) using **joint MAP (Maximum A Posteriori) estimation** with an
+**analytical forward model**. This section describes the forward model, the
+inference framework, and the data processing pipeline.
 
-![algorithm](assets/algorithm.jpg)
+## Overview
 
-## Hydraulic model
+The core idea of SAD v2 is to estimate all unknown parameters — discharge Q
+at each timestep, Manning roughness n, Dingman channel shape r, and downstream
+bed elevation z₀ — **simultaneously** by minimizing a single objective function
+(the negative log-joint). This replaces the v1 two-stage LETKF+GVF pipeline,
+which suffered from two-stage bias (parameters estimated at mean-Q propagate
+systematic bias into Q) and computational cost (O(N × nt) ODE solves).
 
-The forward model in the assimilation scheme is based on the Gradually Varied Flow (GVF) equations, which describe the steady-state, non-uniform flow in river channels with gradual variations in water depth and velocity. The general form of the GVF equation is 
+## Forward model: Manning + first-order GVF perturbation
 
-```math
-\dfrac{dY}{dx} = \dfrac{S_0 - S_f}{1 - \text{Fr}^2}
-```
+Under the low-Froude-number regime (Fr² ≈ 0) typical of large low-gradient
+rivers observed by SWOT, the gradually varied flow equation linearizes around
+uniform flow to produce an exponential backwater decay from the downstream
+boundary condition. This yields a **fully analytical** WSE profile with no ODE
+solve, making it both fast and AD-compatible.
 
-where Y is the average water depth, x is the longitudinal distance, S0 is the channel bed slope, Sf is the water surface slope, and Fr is the Froude number. The latter is given by
-
-```math
-Fr = \dfrac{Q}{WY\sqrt{gY}}
-```
-where W is the average flow width, Q is river discharge, and g is the gravity acceleration, while the water surface slope can be calculated as a function of discharge, channel geometry, and flow resistance.
-
-Integrating the GVF equations allows for calculation of longitudinal profiles of water surface elevation along a river, and are solved using [DifferentialEquations.jl](https://github.com/SciML/DifferentialEquations.jl). 
-
-## Cross sections
-
-Currently, rectangular and Dingman cross sections have been implemented. The latter allows for a more realistic representation of river channel cross sections and is the default in SAD.
+### Manning equation with Dingman cross-section
 
 ![dingman](./assets/cross-section.jpg)
 
-The variables $W^{\ast}$, $W$, $Y_m^{\ast}$, and $Y_m$ are the bankfull width, water surface width, bankfull maximum depth, and maximum depth respectively. These are related to the average width and flow depth via a channel shape parameter $r$
+The Dingman power-law cross-section parameterizes channel shape with a single
+exponent r (1 < r < ∞):
 
 ```math
-Y = \left( \dfrac{r}{r+1} \right) Y_m
+A = W_b \left(\frac{r+1}{r \cdot Y_b}\right)^{1/r} y^{1+1/r}
 ```
-```math
-W = W^{\ast} \left( \dfrac{Y_m}{Y_m^{\ast}} \right)^{1/r}
-```
-
-Hydraulic geometry relations can be incorporated into the SAD GVF model through the relationships between the AHG coefficients and exponents and the channel cross-section geometric variables: 
 
 ```math
-W = a Q^b
+W = W_b \left(\frac{y}{Y_b}\right)^{1/r}
 ```
+
+where ``y`` is mean flow depth, ``W_b`` is bankfull width, ``Y_b`` is bankfull
+mean depth, and ``r`` is the Dingman shape exponent (``r = 1`` for triangular,
+``r \to \infty`` for rectangular).
+
+Under the wide-channel approximation (``R \approx y``), Manning's equation becomes:
+
 ```math
-Y = c Q^f
+Q = \frac{1}{n} W_b \left(\frac{r+1}{r \cdot Y_b}\right)^{1/r} y^{5/3 + 1/r} S^{1/2}
 ```
 
-The r parameter ($0 < r < \infty$) reflects the river channel shape, with r=1 corresponding to a triangular channel. As r increases, the channel banks become steeper, and the bottom becomes flatter leading to a rectangular channel for $r \rightarrow \infty$
+This can be analytically inverted for depth:
 
-## Data assimilation
+```math
+y_0 = \left(\frac{Q \cdot n}{W_b \left(\frac{r+1}{r \cdot Y_b}\right)^{1/r} \sqrt{S}}\right)^{1/(5/3 + 1/r)}
+```
 
-The assimilation algorithm employed in the implementation of SAD presented here is the Local Ensemble Transform Kalman Filter (LETKF). The LETKF is a variant of the Ensemble Kalman Filter that combines a prior probability distribution of state variables (e.g., river discharge) with direct or indirect observations (in this case, water surface elevation and width) to generate an optimal estimate (i.e., analysis). The prior distribution is represented by the model error covariance, which is calculated empirically from an ensemble of unknown model states (i.e., background ensemble). The observations and their uncertainty are represented by mapping the state variables to the observations space (e.g., river discharge to water surface elevation) and an error covariance. The analysis state (both the mean and the ensemble deviations from the mean) is essentially calculated as a function of the prior model ensemble, the model and observation error covariances, and the difference between the model-predicted observations and the actual observations.
+### First-order GVF perturbation
 
-The estimation of river discharge from future SWOT observations can be difficult when bed elevation and/or roughness are unknown due to equifinality. One approach that can aid in the solution of such problems is regularization, wherein additional constraints are introduced in the form of penalty terms similar to the observation difference applied to the LETKF analysis calculation. In the case of river discharge estimation, additional constraints can be derived from the at-a-station hydraulic geometry relations. In particular, it can be shown that assimilating “observations” of the form $W − aQ b=0$, is equivalent to a form of regularization that is adding prior knowledge (in our case adherence to the AHG equations) to help solve an ill-posed inverse problem.
+Linearizing the friction slope around uniform flow with the Dingman geometry:
+
+```math
+\frac{\partial S_f}{\partial y}\bigg|_{y_0} = -\left(\frac{10}{3} + \frac{2}{r}\right) \frac{S_0}{y_0}
+```
+
+In the low-Froude-number limit, the GVF equation yields an exponential decay:
+
+```math
+\lambda = \frac{3\,y_0\,r}{(10\,r + 6)\,S_0}
+```
+
+```math
+y(x) = y_0 + (y_{bc} - y_0) \,\exp(-x/\lambda)
+```
+
+where ``y_{bc} = (H_{bc} - z_0) \cdot r/(r+1)`` is the downstream boundary depth
+and ``H_{bc}`` is the observed downstream WSE (a boundary condition, not a data
+point in the likelihood).
+
+The WSE at any node is then:
+
+```math
+\mathrm{WSE}(x) = z_0 + z_{\mathrm{ref}}(x) + y(x) \cdot \frac{r+1}{r}
+```
+
+Key properties:
+- **Fully analytical**: no ODE solve, enabling millisecond-per-reach computation
+- **AD-compatible**: works with ForwardDiff for gradient and Hessian computation
+- **Physically meaningful**: captures M1 (backwater) and M2 (drawdown) profiles
+- **Asymptotically correct**: λ ≪ L → uniform flow; λ ≫ L → boundary-controlled
+
+## Inference: Joint MAP + Laplace uncertainty
+
+### Parameter vector
+
+All parameters are estimated in a single optimization:
+
+| Component | Variable | Transform | Index |
+|-----------|----------|-----------|-------|
+| Discharge | ``\log Q_t`` (t = 1…nt) | Log-space | θ[1:nt] |
+| Manning roughness | ``\log n`` | Log-space | θ[nt+1] |
+| Dingman shape | ``\log r`` | Log-space | θ[nt+2] |
+| Bed elevation | ``z_0`` | Natural space | θ[nt+3] |
+
+Log-space transforms enforce positivity (Q > 0, n > 0, r > 0) and improve
+optimization conditioning.
+
+### Objective function
+
+The negative log-joint comprises four terms:
+
+**1. WSE likelihood** (applied at upstream nodes j ≥ 2 only):
+
+```math
+\ell_{\mathrm{WSE}} = \sum_{k} \sum_{j \geq 2} \frac{\nu+1}{2} \log\left(1 + \frac{(H_{jk}^{\mathrm{obs}} - \mathrm{WSE}_{jk}^{\mathrm{pred}})^2}{\nu\,\sigma_{\mathrm{obs}}^2}\right)
+```
+
+Student-t (``\nu \approx 5``) for robustness to outliers. Gaussian (``\nu \to \infty``) is also supported.
+
+**2. Width likelihood** (optional, activated via `use_width=true`):
+
+```math
+\ell_{\mathrm{W}} = \sum_{k} \sum_{j \geq 2} \frac{1}{2}\left(\frac{W_{jk}^{\mathrm{obs}} - W_{jk}^{\mathrm{pred}}}{\sigma_W}\right)^2
+```
+
+**3. Parameter priors** (from SoS database):
+
+```math
+\ell_{\mathrm{prior}} = -\log p(Q_t \mid \mathrm{month}_t) - \log p(n) - \log p(r) - \log p(z_0)
+```
+
+Monthly climatological log-normal priors (``\sigma_{\log Q} = 1.0``) resolve the
+n–z₀–Q equifinality. The Manning n prior is truncated Normal(0.03, 0.01, [0.01, 0.05])
+as regularisation.
+
+**4. Temporal smoothness** on log-Q:
+
+```math
+\ell_{\mathrm{smooth}} = \lambda_{\mathrm{smooth}} \sum_{t=2}^{n_t} \left(\log Q_t - \log Q_{t-1}\right)^2
+```
+
+Adaptively reduced for data-sparse reaches (``\lambda_{\mathrm{smooth}} \propto \min(1, f_{\mathrm{data}}/0.1)``
+where ``f_{\mathrm{data}}`` is the fraction of valid timesteps).
+
+### Optimization and uncertainty
+
+The objective is minimized via **L-BFGS** with ForwardDiff-computed gradients
+and Hessians. Convergence typically requires 50–200 iterations.
+
+Posterior uncertainty is obtained via the **Laplace approximation**: the inverse
+Hessian at the MAP estimate gives the posterior covariance matrix ``\Sigma``.
+Q uncertainty is computed via the delta method: ``\sigma_Q \approx Q \cdot \sigma_{\log Q}``.
+
+### σ_obs estimation and retry logic
+
+The WSE observation noise ``\sigma_{\mathrm{obs}}`` is auto-estimated from local
+residuals in the SWOT observations, with a minimum floor of 0.3 m to account
+for model structural error.
+
+If the optimizer converges to **unphysical parameters** (n > 0.10, r > 15,
+z₀ far from hmin, or Q spikes > 10× prior median), ``\sigma_{\mathrm{obs}}``
+is progressively doubled and optimization is retried. This handles cases where
+the auto-estimated noise is too tight for the Manning+Dingman model's structural
+error — common for small rivers with very precise SWOT observations.
+
+If after retry the Manning n exceeds the prior truncation (0.05), the algorithm
+falls back to a **prior + WSE anomaly** method that uses prior medians for
+channel parameters and scales Q by a damped WSE depth anomaly.
+
+## Preprocessing
+
+### SWOT observations to SWOTReach
+
+Raw SWOT observations (WSE, width, slope at irregular node positions) are
+interpolated onto a regular computational chainage using PCHIP interpolation:
+- **Chainage**: downstream (x = 0) to upstream (x increasing), spacing ``\delta x = 200`` m
+- **Bed slope** S₀: time-averaged from SWOT slope observations, floored at ``10^{-5}``
+- **Cumulative bed elevation** ``z_{\mathrm{ref}}(x)``: ``z_{\mathrm{ref}}(x_{j+1}) = z_{\mathrm{ref}}(x_j) + S_0(x_j) \cdot \Delta x``
+- **Bankfull geometry** (``W_b``, ``Y_b``): median across timesteps, PCHIP-interpolated to chainage
+- **Valid timesteps**: those with ≥ 2 valid WSE observations
+
+### B-spline smoothing
+
+Penalized cubic B-splines are available for WSE profile smoothing (via the
+`nknots` and `lambda` keyword arguments in `preprocess`). Generalized
+Cross-Validation (GCV) can automatically select the smoothing parameter.
+B-spline derivatives provide reach-averaged slope and enforce monotonicity.
 
 ## Priors
-Ensemble assimilation methods require the definition of a prior probability distribution from which to generate the ensemble of background variables. Given that our discharge estimation approach needs to be applicable globally, the algorithm must operate on the assumption of minimal prior knowledge regarding river discharge and the various inputs to the GVF model. The inputs to the GVF model that are not directly observed include discharge, bed elevation (as well as bed slope), the roughness coefficient, and the channel shape parameter r.
 
-We adapted a rejection sampling approach to derive appropriate prior distributions for these variables. Rejection sampling is a technique used to generate samples from the target distribution T using the proposal distribution P. Instead of directly sampling from T, the method generates samples from P and accepts/rejects each of those samples according to likelihood ratio 
+Prior distributions are constructed from the **SWORD of Science (SoS)** database
+when available, or from uninformative priors otherwise.
+
+### Discharge priors
+
+When monthly ML discharge estimates are available in SoS, **12 monthly truncated
+LogNormal distributions** are constructed:
+
 ```math
-\dfrac{t(x)}{L p(x)}
+Q_{\mathrm{month}} \sim \mathrm{TruncatedLogNormal}(\log(Q_m) - \sigma^2/2,\; \sigma{=}1.0,\; q_l,\; 10 \cdot Q_m)
 ```
-where L is a constant (L>1) and t(x),p(x) are the density functions of T and P, respectively. In our case, the target distribution is the prior distribution of the unobserved variable (e.g., bed elevation) and the proposal distribution is an uninformative prior. Since the density function of the target distribution is unknown, we use the GVF model as a functional to transform both densities t(x) and p(x) to correspond to density functions of water surface elevation instead of the target variable. The probability density function of WSE can be estimated from the observations, thus allowing us to calculate the likelihood ratio and accept/reject the proposed target-variable value for its prior distribution.
+
+where ``Q_m`` is the monthly ML mean and ``\sigma = 1.0`` in log-space gives a
+95% CI of approximately ``[0.14 \cdot Q_m, 7.4 \cdot Q_m]``, wide enough to
+capture floods and droughts.
+
+When monthly data is unavailable, a single time-invariant truncated LogNormal
+is used with the same ``\sigma = 1.0``.
+
+### Static parameter priors
+
+| Parameter | Distribution | Support | Source |
+|-----------|--------------|---------|--------|
+| Manning n | Truncated Normal(0.03, 0.01) | [0.01, 0.05] | SoS bounds |
+| Dingman r | Truncated Normal(μ, σ) or Uniform | Variable | SoS or river class |
+| Bed elevation z₀ | Uniform | [hmin − depth − depth, hmin − depth + depth] | Manning depth estimate |
+
+The n prior truncation at 0.05 acts as regularisation — values above 0.05 are
+uncommon in natural channels and typically indicate the optimizer is compensating
+for model structural error. A subsequent check at n > 0.10 flags genuinely
+unphysical solutions.
+
+### z₀ prior estimation
+
+The downstream bed elevation prior is centered on:
+
+```math
+z_0 \approx h_{\min} - y_{\mathrm{Manning}}
+```
+
+where ``y_{\mathrm{Manning}}`` is the Manning depth estimated from the SoS mean
+discharge, a typical n (0.035), and the reach slope. Width for the Manning depth
+estimate comes from a Q–W scaling relationship: ``W \approx 5\sqrt{Q}``.

@@ -68,8 +68,8 @@ Discharge Q [m³/s]
 
 # Examples
 ```jldoctest
-julia> Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4)
-345.7...  # approximately
+julia> round(Sad.manning_Q(0.03, 2.0, 5.0, 200.0, 10.0, 1e-4), digits=1)
+844.1
 ```
 """
 function manning_Q(n::Real, r::Real, y::Real, Wb::Real, Yb::Real, S::Real)

@@ -3,7 +3,12 @@ using Statistics
 using BSplineKit
 using LinearAlgebra
 
-# type alias for float or missing data
+"""
+    FloatM
+
+Type alias for `Union{Missing, Float64}`. Used throughout SAD for SWOT
+observation matrices that may contain missing values.
+"""
 const FloatM = Union{Missing, Float64}
 
 """

@@ -1,9 +1,20 @@
-# Sad.jl Documentation
+# SAD.jl Documentation
 
 ```@contents
 Pages = ["installation.md", "algorithm.md", "use_cases.md", "api.md"]
 ```
 
-The Surface Water Ocean Topography (SWOT) satellite mission that launched in December 2022 will offer a unique opportunity to map river discharge at an unprecedented spatial resolution globally from observations of water surface elevation, width, and slope. Because river discharge will not be directly observed from SWOT, a number of algorithms of varying complexity have been developed to estimate discharge from SWOT observables. The SAD algorithm operates on the set of SWOT observables (i.e., WSE, width, and slope) and derives an estimate of river discharge and its associated uncertainty using a data assimilation scheme. The assimilation scheme involves the “first‐guess” estimation of hydraulic variables by combining a forward model with a set of prior probability distributions before assimilating the SWOT observations. The priors are estimated with a sampling approach, as these data‐driven methods have shown promise in many fields. The objective of the algorithm is to estimate discharge at each river reach when SWOT observations become available.
+The Surface Water Ocean Topography (SWOT) satellite mission, launched in December 2022, provides unprecedented observations of river water surface elevation (WSE), width, and slope at global scale. Because river discharge is not directly observed by SWOT, the SAD (SWOT Assimilated Discharge) algorithm estimates discharge from these observables using a data assimilation framework.
 
+**SAD v2** implements a **joint MAP (Maximum A Posteriori) estimation** approach that simultaneously infers discharge, Manning roughness, Dingman channel shape, and bed elevation by combining an **analytical forward model** with prior distributions from the SWORD of Science (SoS) database.
 
+Key features of v2:
+
+- **Analytical forward model**: Manning equation with first-order GVF (Gradually Varied Flow) backwater perturbation — no ODE solve, fully AD-compatible
+- **Joint optimization**: All parameters (Q₁…Qₜ, n, r, z₀) estimated simultaneously via L-BFGS, eliminating the two-stage bias of v1
+- **Monthly Q priors**: Seasonal discharge priors from SoS, resolving n–z₀–Q equifinality
+- **Robust likelihood**: Student-t (ν ≈ 3–5) for outlier resistance
+- **Temporal smoothness**: Penalty on successive log-Q differences for coherent hydrographs
+- **Laplace uncertainty**: Posterior covariance from the Hessian at MAP
+- **Adaptive σ_obs**: Auto-estimated WSE noise with retry mechanism for small rivers
+- **Fallback strategy**: Prior + WSE anomaly when MAP produces unphysical parameters
