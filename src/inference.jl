@@ -363,8 +363,11 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
                 y_at_node = max((WSE_pred[js[idx]] - z0 - precomp.z_ref_nodes[js[idx]]) * r / (r + 1), 0.01)
                 Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0, 0.01)
                 W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r)
-                # Use large width uncertainty to reflect model structural error
-                σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.3 * precomp.Wb_nodes[js[idx]])
+                # Width uncertainty: fractional uncertainty from data plus a
+                # structural error floor. SWOT width accuracy is ~10-15% of width;
+                # the model has additional structural error from assuming uniform
+                # r and Wb along the reach. A 15% floor balances these sources.
+                σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
                 residual_W = Wobs[idx] - W_pred
                 nll += 0.5 * (residual_W / σ_W)^2
             end

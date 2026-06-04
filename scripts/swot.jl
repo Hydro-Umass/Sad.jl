@@ -159,18 +159,20 @@ Main driver routine for SAD v2 discharge estimation.
 
 # Keyword arguments
 
-- `σ_obs`:       observation error scale [m] (default 0.1)
-- `ν`:           Student-t d.f.; `Inf` = Gaussian (default `Inf`)
-- `λ_smooth`:    temporal smoothness weight (default 1.0)
+- `σ_obs`:       observation error scale [m] (default NaN: auto-estimate)
+- `ν`:           Student-t d.f.; `Inf` = Gaussian (default 5.0)
+- `λ_smooth`:    temporal smoothness weight (default 0.1)
 - `iterations`:  max L-BFGS iterations (default 500)
 - `g_tol`:       gradient convergence tolerance (default 1e-6)
+- `use_width`:   use width observations in likelihood (default true)
 """
 function main(reachid, swordfile, sosfile, swotfile, outdir;
               σ_obs::Float64     = NaN,
               ν::Float64         = 5.0,
               λ_smooth::Float64  = 0.1,
               iterations::Int    = 500,
-              g_tol::Float64     = 1e-6)
+              g_tol::Float64     = 1e-6,
+              use_width::Bool    = true)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
@@ -197,7 +199,8 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
                             ν         = ν,
                             λ_smooth  = λ_smooth,
                             iterations = iterations,
-                            g_tol     = g_tol)
+                            g_tol     = g_tol,
+                            use_width = use_width)
 
         # Check if inference produced valid results
         # (data-sparse reaches return NaN with fallback=true)
