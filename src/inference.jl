@@ -871,3 +871,42 @@ function laplace_uncertainty(obj, θ_map::AbstractVector)
         return zeros(length(θ_map), length(θ_map))
     end
 end
+
+"""
+    compute_A0(reach, reach_ensemble) -> Float64
+
+Compute the reference cross-sectional area A0 at the minimum observed
+downstream WSE (reach.hmin) using the posterior mean Dingman parameters.
+
+In the Durand-Manning formulation:
+    Q = (1/n) * (A0 + dA)^(5/3) * W^(-2/3) * S^(1/2)
+
+A0 is the cross-sectional area at the minimum observed WSE — the
+reference state from which SWOT dA observations are measured.
+
+Uses the Dingman power-law cross section:
+    A = Wb * (Ym / Yb)^(1/r) * y
+
+where y is the mean flow depth at hmin and Ym = (r+1)/r * y.
+"""
+function compute_A0(reach::SWOTReach, res::NamedTuple)
+    r_mean = res.r_post
+    z0_mean = res.z0_post
+
+    # downstream node geometry
+    x_ds = reach.x[1]
+    Wb   = reach.wbf(x_ds)                      # bankfull width [m]
+    hbf  = reach.hbf(x_ds)                      # bankfull WSE [m]
+    zx   = z0_mean + reach.z(x_ds)              # bed elevation at x_ds
+                                                  # = z0_mean since z(x[1])=0
+    Yb   = max(hbf - zx, 0.01)                  # bankfull mean depth [m]
+
+    # mean flow depth at minimum observed WSE
+    y0   = max((reach.hmin - zx) * r_mean / (r_mean + 1), 0.01)
+
+    # Dingman area at y0
+    Ym   = (r_mean + 1) / r_mean * y0
+    A0   = Wb * (Ym / Yb)^(1 / r_mean) * y0
+
+    return A0
+end
