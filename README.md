@@ -19,11 +19,22 @@ SAD v2 estimates discharge for individual river reaches by:
 
 ### Manning + Dingman forward model
 
-Water depth at each cross-section is computed via the gradually varied flow (GVF) equation:
+Rather than numerically integrating the full gradually varied flow (GVF) equation, the SAD v2 forward model uses a **first-order backwater perturbation** that yields a fully analytical, automatic-differentiation–compatible WSE profile. Under the low-Froude-number regime (Fr² ≈ 0) typical of large low-gradient rivers observed by SWOT, the GVF equation linearises to an exponential backwater decay from the downstream boundary:
 
-$$\frac{dY}{dx} = \frac{S_0 - S_f}{1 - \mathrm{Fr}^2}$$
+1. **Uniform flow depth** is obtained by inverting Manning's equation with the Dingman power-law cross-section:
+   *y₀* = manning_depth(*Q*, *n*, *r*, *W*_b, *Y*_b, *S*₀)
 
-where friction slope *S_f* follows Manning's equation and the Froude number uses the Dingman cross-section geometry with shape parameter *r*. The model predicts WSE and width at observed nodes, which are compared against SWOT observations in the likelihood.
+2. **Backwater length** (e-folding distance) captures how far upstream the downstream boundary condition penetrates:
+   *λ* = 3·*y₀*·*r* / ((10·*r* + 6)·*S*₀)
+
+   For *r* → ∞ (rectangular channel), *λ* → 3·*y₀*/(10·*S*₀), the standard result.
+
+3. **Depth profile** decays exponentially from the downstream boundary depth (*y*_bc) toward uniform flow:
+   *y*(*x*) = *y₀* + (*y*_bc − *y₀*) · exp(−*x* / *λ*)
+
+4. **WSE and width** are recovered at each observed node from depth via Dingman geometry and compared against SWOT observations in the likelihood.
+
+This analytical approximation correctly captures M1 (backwater) and M2 (drawdown) profiles for low-Froude-number rivers, smoothly interpolating between boundary-controlled flow (*λ* ≪ *L*) and uniform flow (*λ* ≫ *L*). It cannot represent near-critical flow (Fr ≈ 1) or hydraulic jumps.
 
 ### Priors
 
@@ -108,6 +119,8 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
 ## References
+
+- Andreadis, K. M., Coss, S. P., Durand, M., Gleason, C. J., Simmons, T. T., Tebaldi, N., et al. (2025). A first look at river discharge estimation from SWOT satellite observations. *Geophysical Research Letters*, 52, e2024GL114185. https://doi.org/10.1029/2024GL114185
 
 - Andreadis, K. M., Brinkerhoff, C. B., & Gleason, C. J. (2020). Constraining the assimilation of SWOT observations with hydraulic geometry relations. *Water Resources Research*, 56, e2019WR026811. https://doi.org/10.1029/2019WR026811
 
