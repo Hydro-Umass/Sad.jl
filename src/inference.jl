@@ -311,7 +311,7 @@ The objective comprises four terms:
    residuals between predicted and observed WSE at upstream nodes (j ≥ 2).
 2. **Q priors**: monthly climatological log-normal priors in Q-space.
 3. **Static priors**: on n, r, z₀ from the SoS database.
-4. **Temporal smoothness**: penalty on successive Q differences.
+4. **Temporal smoothness**: penalty on fractional Q changes (log-space differences).
 
 # Arguments
 - `θ`:        parameter vector of length `nt + 3`
@@ -425,11 +425,15 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # z₀ prior (natural space, no Jacobian)
     nll -= safe_logpdf(priors.zp, z0)
 
-    # --- 4. Temporal smoothness on Q ---
+    # --- 4. Temporal smoothness on relative Q changes ---
+    # Penalize fractional (log-space) changes: a 10% Q change gets the same
+    # penalty whether Q is 10 or 1000 m³/s. Using log(Q) preserves the
+    # relative-change semantics of the log-space formulation while Q itself
+    # remains in natural space.
     for t in 2:nt
-        Qt  = θ[t]   * precomp.q_scale[t]
-        Qt1 = θ[t-1] * precomp.q_scale[t-1]
-        nll += λ_smooth * (Qt - Qt1)^2
+        Qt  = max(θ[t]   * precomp.q_scale[t],   0.01)
+        Qt1 = max(θ[t-1] * precomp.q_scale[t-1], 0.01)
+        nll += λ_smooth * (log(Qt) - log(Qt1))^2
     end
 
     return nll
