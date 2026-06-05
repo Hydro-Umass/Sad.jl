@@ -801,8 +801,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                 old_z0, old_Qmean = z0_post, mean(Q_post)
                 z0_post = z0_corr
                 # Recompute Q from corrected z₀ using the same n and Manning depth
-                for t in 1:nt
-                    ki = findfirst(==(t), precomp.valid_ts)
+                for (ki, t) in enumerate(precomp.valid_ts)
                     H_bc_t = precomp.H_bc[ki]
                     # Depth at boundary = H_bc - z0_corr
                     y_bc = max(H_bc_t - z0_corr, 0.01)
