@@ -187,7 +187,7 @@ function estimate_bed_slope(Sobs :: Matrix{FloatM}, min_slope :: Float64)
     S_reach = isempty(all_valid) ? min_slope : mean(all_valid)
     for k in 1:n
         row = Sobs[k, :]
-        valid  = [s for s in skipmissing(row) if s > 0]
+        valid  = [abs(s) for s in skipmissing(row) if abs(s) > 0]
         S0[k] = isempty(valid) ? S_reach : mean(valid)
     end
     return S0
