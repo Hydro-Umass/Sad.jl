@@ -181,7 +181,9 @@ Estimate the bed slope profile of the river reach from the time-averaged SWOT wa
 function estimate_bed_slope(Sobs :: Matrix{FloatM}, min_slope :: Float64)
     n = size(Sobs, 1)
     S0 = zeros(n)
-    all_valid = [s for s in skipmissing(vec(Sobs)) if s > 0]
+    # SWOT slope convention: negative for normally-flowing rivers
+    # (WSE decreases downstream). Use absolute values.
+    all_valid = [abs(s) for s in skipmissing(vec(Sobs)) if !isnan(abs(s)) && abs(s) > 0]
     S_reach = isempty(all_valid) ? min_slope : mean(all_valid)
     for k in 1:n
         row = Sobs[k, :]
