@@ -106,21 +106,27 @@ function priors(sosfile::String, hmin::Float64, reachid::Int;
         depth_est = _manning_depth_estimate(q_m_f, S0_est, n_est=0.035)
         z0_est    = hmin - depth_est
 
-        # Guard against degenerate z0 prior when hmin is zero (e.g., no valid
-        # WSE observations) or depth_est is zero. When hmin ≈ 0 the uniform
-        # bounds collapse, so we widen the prior significantly.
-        z0_lo = z0_est - depth_est
-        z0_hi = z0_est + depth_est
+        # Bed elevation prior: truncated Normal centred at the Manning-based
+        # estimate with σ = depth_est/2.  A Normal prior concentrates mass near
+        # z0_est and penalises the degenerate solution where z0 → hmin (which
+        # implies near-zero depth and underestimates Q).  The upper bound is
+        # capped below hmin to enforce a minimum depth floor (0.5 m).
+        y_floor   = 0.5  # minimum plausible flow depth [m]
+        z0_sig    = max(depth_est / 2, 0.5)
+        z0_lo     = z0_est - 2 * depth_est
+        z0_hi     = min(z0_est + depth_est, hmin - y_floor)
         if z0_lo >= z0_hi
             # Fallback: use a wide prior centred on a reasonable bed elevation
             z0_lo = hmin - 15.0
-            z0_hi = hmin + 5.0
+            z0_hi = hmin - y_floor
             if z0_lo >= z0_hi
                 z0_lo = 0.0
                 z0_hi = 10.0
             end
+            zp = Uniform(z0_lo, z0_hi)
+        else
+            zp = truncated(Normal(z0_est, z0_sig), z0_lo, z0_hi)
         end
-        zp = Uniform(z0_lo, z0_hi)
         SWOTPriors(Qp, np, rp, zp)
     end
 end

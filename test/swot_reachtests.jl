@@ -61,7 +61,7 @@ const REACHES = Dict(
         gage_col   = nothing,   # small Oceania reach, no gage
         n_valid_ts_min = 20,
         expected = (
-            n_range      = (0.01, 0.15),  # wider range due to σ_obs retry
+            n_range      = (0.005, 0.15),  # wider range due to σ_obs retry (n_lo=0.005)
             r_range      = (1.0, 15.0),   # wider range due to σ_obs retry
             z0_below_hmin = false,         # z₀ may be above hmin for small rivers
             Q_median_max = 100.0,

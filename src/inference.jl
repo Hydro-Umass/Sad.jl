@@ -34,8 +34,9 @@ function safe_logpdf(d, x)
         # gradient back toward the support when the optimizer strays outside.
         lp = safe_logpdf(d.untruncated, x)
         lo, hi = minimum(d), maximum(d)
-        # Barrier width: fraction of the support range
-        barrier_scale = (hi - lo) * 0.2
+        # Barrier width: small fraction of the support range so that
+        # straying 10% outside bounds incurs a ~5 nat penalty.
+        barrier_scale = (hi - lo) * 0.05
         if x < lo
             lp -= 0.5 * ((lo - x) / barrier_scale)^2
         elseif x > hi
@@ -788,6 +789,30 @@ function infer(p::SWOTPriors, reach::SWOTReach;
         z0_post = θ_profile[nt + 1]  # z₀ may shift to accommodate new Q
         # n (and r in Dingman mode) remain at their MAP values
         println("  Profile refit: Q range=$(round(minimum(Q_post),digits=1))..$(round(maximum(Q_post),digits=1)), z0=$(round(z0_post,digits=2))")
+
+        # --- WSE-Width depth correction (rectangular only) ---
+        # In rectangular mode, z₀ and depth are degenerate: WSE = z₀ + y
+        # The optimizer moves z₀ toward hmin (shallow depth, low Q).
+        # Use the observed WSE-Width relationship to obtain an independent
+        # depth estimate and correct z₀.
+        if rectangular
+            z0_corr = _wse_width_depth_correction(precomp, z0_post, n_post, p)
+            if z0_corr !== nothing && abs(z0_corr - z0_post) > 0.3
+                old_z0, old_Qmean = z0_post, mean(Q_post)
+                z0_post = z0_corr
+                # Recompute Q from corrected z₀ using the same n and Manning depth
+                for t in 1:nt
+                    ki = findfirst(==(t), precomp.valid_ts)
+                    H_bc_t = precomp.H_bc[ki]
+                    # Depth at boundary = H_bc - z0_corr
+                    y_bc = max(H_bc_t - z0_corr, 0.01)
+                    Wb_bc = precomp.Wb_nodes[1]  # downstream node bankfull width
+                    Q_post[t] = manning_Q_rect(n_post, y_bc, Wb_bc, precomp.S0)
+                end
+                @info "wse_width_correction" old_z0 new_z0=z0_post old_Q_mean=old_Qmean new_Q_mean=mean(Q_post)
+                println("  WSE-Width correction: z0 $(round(old_z0,digits=2))→$(round(z0_post,digits=2)), Q mean $(round(old_Qmean,digits=1))→$(round(mean(Q_post),digits=1))")
+            end
+        end
     end
 
     # Laplace uncertainty (use the final objective with the correct σ_obs)
@@ -985,6 +1010,91 @@ function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
         end
     catch e
         @warn "_profile_refit: optimization failed" exception=(e, catch_backtrace())
+        return nothing
+    end
+end
+
+"""
+    _wse_width_depth_correction(precomp, z0_post, n_post, priors) -> Float64 or nothing
+
+Estimate a corrected z₀ from the observed WSE-Width relationship.
+
+In rectangular mode, z₀ and flow depth y are degenerate: WSE = z₀ + y.
+The MAP optimizer pushes z₀ toward hmin (minimum observed WSE),
+resulting in very shallow depth and underestimated Q.  This function
+regresses mean width against mean WSE per timestep to estimate dW/dH.
+If dW/dH > 0, width constrains depth independently from WSE:
+    Δy ≈ ΔW / (dW/dH)
+With y_mean estimated from the width range, z₀ = WSE_mean - y_mean.
+
+Returns a corrected z₀, or `nothing` if the WSE-Width regression is
+uninformative (e.g., r² < 0.05 or dW/dH ≤ 0).
+"""
+function _wse_width_depth_correction(precomp::ManningPrecomp, z0_post::Float64,
+                                       n_post::Float64, priors::SWOTPriors)
+    # Collect per-timestep mean WSE and mean Width
+    wse_vals = Float64[]
+    w_vals   = Float64[]
+    Wb_est   = mean(precomp.Wb_nodes)  # reach-average bankfull width
+    for k in 1:length(precomp.valid_ts)
+        Hobs = precomp.upstream_H[k]
+        Wobs = precomp.upstream_W[k]
+        js   = precomp.upstream_j[k]
+        h_valid = Float64[]
+        w_valid = Float64[]
+        for idx in 1:length(js)
+            if !isnan(Hobs[idx]) && !isnan(Wobs[idx])
+                push!(h_valid, Hobs[idx])
+                push!(w_valid, Wobs[idx])
+            end
+        end
+        length(h_valid) >= 3 || continue
+        push!(wse_vals, mean(h_valid))
+        push!(w_vals, mean(w_valid))
+    end
+    length(wse_vals) < 8 && return nothing
+
+    # Linear regression: W = a + b * WSE
+    X = hcat(ones(length(wse_vals)), wse_vals)
+    beta = X \ w_vals
+    dWdH = beta[2]
+
+    # Quality checks: need positive dW/dH and enough spread
+    dWdH <= 0 && return nothing
+    ss_res = sum((w_vals .- (beta[1] .+ beta[2] .* wse_vals)).^2)
+    ss_tot = sum((w_vals .- mean(w_vals)).^2)
+    ss_tot ≈ 0 && return nothing
+    r2 = 1 - ss_res / ss_tot
+    r2 < 0.05 && return nothing
+
+    # Depth at mean WSE from width change:
+    # W_mean = Wb + dW/dH * y_mean  (approximately, for Dingman-like geometry)
+    # y_mean = (W_mean - Wb) / dW/dH
+    W_mean = mean(w_vals)
+    W_min = minimum(w_vals)
+
+    # Use the MINIMUM observed width as the bankfull reference (exposed banks).
+    # The median (Wb_nodes) may already include water above banks.
+    W_min = minimum(w_vals)       # minimum per-timestep mean width
+    ΔW = W_mean - W_min
+    if ΔW < 0.1 * W_min
+        # Width varies little — no depth info from width range
+        return nothing
+    end
+
+    # Depth estimate from width variation:
+    # ΔW ≈ dW/dH * Δy  →  Δy = ΔW / dW/dH
+    # This is the depth RANGE.  Minimum depth (at W_min) is unknown but ≥ 0.
+    # z0_max = WSE_mean - Δy  (bed is at most this high; could be lower if
+    # the minimum depth at W_min is > 0)
+    Δy = ΔW / dWdH
+    WSE_mean = mean(wse_vals)
+    z0_corr_max = WSE_mean - Δy
+
+    # Only apply correction if z0_post is significantly above z0_corr_max
+    if z0_corr_max < z0_post - 0.3
+        return z0_corr_max
+    else
         return nothing
     end
 end
