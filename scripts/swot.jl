@@ -172,7 +172,8 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
               λ_smooth::Float64  = 0.1,
               iterations::Int    = 500,
               g_tol::Float64     = 1e-6,
-              use_width::Bool    = false)
+              use_width::Bool    = false,
+              rectangular::Bool  = false)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
@@ -194,13 +195,14 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
 
     try
         res = Sad.infer(p, reach;
-                            time_str  = time_str,
-                            σ_obs     = σ_obs,
-                            ν         = ν,
-                            λ_smooth  = λ_smooth,
+                            time_str   = time_str,
+                            σ_obs      = σ_obs,
+                            ν          = ν,
+                            λ_smooth   = λ_smooth,
                             iterations = iterations,
-                            g_tol     = g_tol,
-                            use_width = use_width)
+                            g_tol      = g_tol,
+                            use_width  = use_width,
+                            rectangular = rectangular)
 
         # Check if inference produced valid results
         # (data-sparse reaches return NaN with fallback=true)

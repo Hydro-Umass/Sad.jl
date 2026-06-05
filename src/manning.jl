@@ -331,3 +331,86 @@ where `Yb` is the bankfull mean depth.
 function compute_width(y::Real, Wb::Real, Yb::Real, r::Real)
     Wb * (y / Yb)^(1 / r)
 end
+
+# ============================================================
+# Rectangular channel variants
+# ============================================================
+#
+# The rectangular channel model assumes W = Wb (constant width, independent
+# of depth). This eliminates the Dingman shape parameter r, reducing the
+# parameter vector from [logQ_1..logQ_T, logn, logr, z0] to
+# [logQ_1..logQ_T, logn, z0].
+#
+# Rationale: the Dingman model W = Wb*(y/Yb)^(1/r) fits poorly to SWOT width
+# observations (median R²=0.31, 17% of reaches have negative WSE-Width
+# correlation). The r parameter was poorly constrained and created Q-r-n
+# degeneracies. For wide channels (Wb >> 2y, covering most SWOT reaches),
+# R ≈ y regardless of shape, so the rectangular approximation has minimal
+# impact on the Q-y relationship.
+
+"""
+    manning_Q_rect(n, y, Wb, S) -> Float64
+
+Discharge from Manning's equation for a rectangular channel (wide-channel
+approximation R ≈ y).
+
+    Q = (1/n) * Wb * y^(5/3) * √S
+
+This is the limit of `manning_Q` as r → ∞.
+"""
+function manning_Q_rect(n::Real, y::Real, Wb::Real, S::Real)
+    y = max(y, 0.01)
+    return (1 / n) * Wb * y^(5 / 3) * sqrt(S)
+end
+
+"""
+    manning_depth_rect(Q, n, Wb, S) -> Float64
+
+Invert Manning's equation for flow depth in a rectangular channel.
+
+    y = (Q*n / (Wb * √S))^(3/5)
+
+This is the limit of `manning_depth` as r → ∞.
+"""
+function manning_depth_rect(Q::Real, n::Real, Wb::Real, S::Real)
+    Q = max(Q, 0.01)
+    return (Q * n / (Wb * sqrt(S)))^(3 / 5)
+end
+
+"""
+    backwater_length_rect(y0, S0) -> Float64
+
+Backwater length for a rectangular channel (limit of `backwater_length` as r → ∞).
+
+    λ = 3*y0 / (10*S0)
+"""
+function backwater_length_rect(y0::Real, S0::Real)
+    y0 = max(y0, 0.01)
+    return 3 * y0 / (10 * S0)
+end
+
+"""
+    manning_wse_backwater_rect(Q, n, z0, S0, H_bc, x_nodes, Wb_nodes, z_nodes)
+        -> Vector
+
+Predict WSE profile for a rectangular channel with first-order GVF backwater.
+
+    y₀  = manning_depth_rect(Q, n, Wb̄, S₀)
+    y_bc = H_bc - z₀                    (depth = WSE - bed, no r/(r+1) factor)
+    λ   = 3*y₀ / (10*S₀)
+    y(x) = y₀ + (y_bc − y₀) · exp(−x/λ)
+    WSE(x) = z₀ + z_ref(x) + y(x)       (no (r+1)/r factor)
+"""
+function manning_wse_backwater_rect(Q::Real, n::Real, z0::Real,
+                                     S0::Real, H_bc::Real,
+                                     x_nodes::AbstractVector,
+                                     Wb_nodes::AbstractVector,
+                                     z_nodes::AbstractVector)
+    Wb̄ = mean(Wb_nodes)
+    y0 = manning_depth_rect(Q, n, Wb̄, S0)
+    y0 = max(y0, 0.01)
+    y_bc = max(H_bc - z0, 0.01)
+    λ = backwater_length_rect(y0, S0)
+    y = y0 .+ (y_bc - y0) .* exp.(-x_nodes ./ λ)
+    return z0 .+ z_nodes .+ y
+end

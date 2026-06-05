@@ -308,17 +308,22 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
                        σ_obs::Float64 = NaN,
                        ν::Float64    = 5.0,
                        λ_smooth::Float64 = 0.0,
-                       use_width::Bool = false)
+                       use_width::Bool = false,
+                       rectangular::Bool = false)
     # Auto-select σ_obs from estimated noise if not provided
     σ = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
     nt = precomp.nt
     logQ = view(θ, 1:nt)
     logn = θ[nt + 1]
-    logr = θ[nt + 2]
-    z0   = θ[nt + 3]
-
     n = exp(logn)
-    r = exp(logr)
+
+    if rectangular
+        z0 = θ[nt + 2]  # no r parameter
+    else
+        logr = θ[nt + 2]
+        z0   = θ[nt + 3]
+        r = exp(logr)
+    end
 
     # Bankfull depth at each node (depends on z₀)
     Yb_nodes = max.(precomp.hbf_z_nodes .- z0, 0.01)
@@ -340,9 +345,15 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # --- 1. WSE log-likelihood at upstream nodes ---
     for k in 1:length(precomp.valid_ts)
         Q_t = exp(logQ[precomp.valid_ts[k]])
-        WSE_pred = manning_wse_backwater(
-            Q_t, n, r, z0, precomp.S0, precomp.H_bc[k],
-            precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+        if rectangular
+            WSE_pred = manning_wse_backwater_rect(
+                Q_t, n, z0, precomp.S0, precomp.H_bc[k],
+                precomp.x_nodes, precomp.Wb_nodes, precomp.z_ref_nodes)
+        else
+            WSE_pred = manning_wse_backwater(
+                Q_t, n, r, z0, precomp.S0, precomp.H_bc[k],
+                precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+        end
 
         js   = precomp.upstream_j[k]
         Hobs = precomp.upstream_H[k]
@@ -359,17 +370,21 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
             end
             # Width likelihood (skip if W is NaN — missing observation)
             if use_width && !isnan(Wobs[idx])
-                # Predicted width: W_pred = Wb * (y/Yb)^(1/r)
-                y_at_node = max((WSE_pred[js[idx]] - z0 - precomp.z_ref_nodes[js[idx]]) * r / (r + 1), 0.01)
-                Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0, 0.01)
-                W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r)
-                # Width uncertainty: fractional uncertainty from data plus a
-                # structural error floor. SWOT width accuracy is ~10-15% of width;
-                # the model has additional structural error from assuming uniform
-                # r and Wb along the reach. A 15% floor balances these sources.
-                σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
-                residual_W = Wobs[idx] - W_pred
-                nll += 0.5 * (residual_W / σ_W)^2
+                if rectangular
+                    # Rectangular: W = Wb (constant)
+                    W_pred = precomp.Wb_nodes[js[idx]]
+                    σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
+                    residual_W = Wobs[idx] - W_pred
+                    nll += 0.5 * (residual_W / σ_W)^2
+                else
+                    # Dingman: W_pred = Wb * (y/Yb)^(1/r)
+                    y_at_node = max((WSE_pred[js[idx]] - z0 - precomp.z_ref_nodes[js[idx]]) * r / (r + 1), 0.01)
+                    Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0, 0.01)
+                    W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r)
+                    σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
+                    residual_W = Wobs[idx] - W_pred
+                    nll += 0.5 * (residual_W / σ_W)^2
+                end
             end
         end
     end
@@ -391,8 +406,10 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # n prior (in natural n-space, with Jacobian for logn parameterization)
     nll -= safe_logpdf(priors.np, n) + logn
 
-    # r prior (in natural r-space, with Jacobian for logr parameterization)
-    nll -= safe_logpdf(priors.rp, r) + logr
+    if !rectangular
+        # r prior (in natural r-space, with Jacobian for logr parameterization)
+        nll -= safe_logpdf(priors.rp, r) + logr
+    end
 
     # z₀ prior (natural space, no Jacobian)
     nll -= safe_logpdf(priors.zp, z0)
@@ -418,8 +435,9 @@ posterior uncertainty.
 # Parameter vector θ (length nt + 3)
 - `θ[1:nt]`   = log(Q_t) — discharge at each timestep
 - `θ[nt+1]`  = log(n)    — Manning roughness
-- `θ[nt+2]`  = log(r)    — Dingman shape exponent
-- `θ[nt+3]`  = z₀        — downstream bed elevation
+- `θ[nt+2]`  = log(r)    — Dingman shape exponent (Dingman only)
+- `θ[nt+3]`  = z₀        — downstream bed elevation (Dingman only)
+- `θ[nt+2]`  = z₀        — downstream bed elevation (rectangular only)
 
 # Arguments
 - `priors`: `SWOTPriors` with prior distributions
@@ -455,7 +473,8 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                iterations::Int   = 500,
                g_tol::Float64   = 1e-6,
                S0::Union{Nothing, Float64} = nothing,
-               use_width::Bool  = false)
+               use_width::Bool  = false,
+               rectangular::Bool = false)
     # Extract months
     months = if !isempty(time_str) && p.Qp isa Vector
         map(time_str) do s
@@ -522,10 +541,10 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     println("  σ_obs = $(round(σ_use, digits=3)) m, λ_smooth = $(round(λ_use, digits=4)) (data_fraction=$(round(data_fraction, digits=3)))")
 
     # Initialize from prior medians
-    θ0 = initialize_theta(p, precomp, months)
+    θ0 = initialize_theta(p, precomp, months; rectangular=rectangular)
 
     # Objective closure
-    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
+    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular)
 
     # In-place gradient via ForwardDiff
     function g!(G, θ)
@@ -552,19 +571,27 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     # the prior was overwhelmed by the likelihood. We now also retry when
     # the optimizer converges to unphysical parameters.
     n_post_check  = exp(Optim.minimizer(result)[nt + 1])
-    r_post_check  = exp(Optim.minimizer(result)[nt + 2])
-    z0_post_check = Optim.minimizer(result)[nt + 3]
+    if rectangular
+        z0_post_check = Optim.minimizer(result)[nt + 2]
+        r_post_check  = NaN  # no r in rectangular mode
+    else
+        r_post_check  = exp(Optim.minimizer(result)[nt + 2])
+        z0_post_check = Optim.minimizer(result)[nt + 3]
+    end
 
-    # Physical bounds for static parameters.  These are slightly wider than
-    # the prior bounds to allow the optimizer some room, but values well
-    # outside indicate a degenerate solution.
+    # Physical bounds for static parameters.
     n_lo, n_hi = 0.005, 0.12
     r_hi = 20.0
     z0_lo, z0_hi = reach.hmin - 30, reach.hmin + 10
 
-    physical = n_lo <= n_post_check <= n_hi &&
-                r_post_check <= r_hi &&
-                z0_lo <= z0_post_check <= z0_hi
+    physical = if rectangular
+        n_lo <= n_post_check <= n_hi &&
+        z0_lo <= z0_post_check <= z0_hi
+    else
+        n_lo <= n_post_check <= n_hi &&
+        r_post_check <= r_hi &&
+        z0_lo <= z0_post_check <= z0_hi
+    end
 
     # Additional checks for inference quality:
     # 1. n well outside the prior support (n > 0.10 is physically unreasonable
@@ -589,7 +616,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
         max_σ = 10.0 * σ_use
         while σ_use < max_σ
             σ_use *= 2.0
-            obj_retry(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
+            obj_retry(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular)
             function g_retry!(G, θ)
                 G .= ForwardDiff.gradient(obj_retry, θ)
             end
@@ -599,11 +626,20 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                                              allow_f_increases=true,
                                              show_trace=false))
             n_post_check  = exp(Optim.minimizer(result)[nt + 1])
-            r_post_check  = exp(Optim.minimizer(result)[nt + 2])
-            z0_post_check = Optim.minimizer(result)[nt + 3]
-            physical = n_lo <= n_post_check <= n_hi &&
-                        r_post_check <= r_hi &&
-                        z0_lo <= z0_post_check <= z0_hi
+            if rectangular
+                z0_post_check = Optim.minimizer(result)[nt + 2]
+            else
+                r_post_check  = exp(Optim.minimizer(result)[nt + 2])
+                z0_post_check = Optim.minimizer(result)[nt + 3]
+            end
+            physical = if rectangular
+                n_lo <= n_post_check <= n_hi &&
+                z0_lo <= z0_post_check <= z0_hi
+            else
+                n_lo <= n_post_check <= n_hi &&
+                r_post_check <= r_hi &&
+                z0_lo <= z0_post_check <= z0_hi
+            end
             # Re-check Q sanity with updated parameters
             Q_retry = exp.(Optim.minimizer(result)[1:nt])
             q_spike_retry = any(Q_retry .> 10.0 .* q_prior_medians)
@@ -619,9 +655,9 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     Q_final = exp.(Optim.minimizer(result)[1:nt])
     q_spike_final = any(Q_final .> 10.0 .* q_prior_medians)
     final_physical = n_lo <= n_post_check <= n_hi &&
-                      r_post_check <= r_hi &&
                       z0_lo <= z0_post_check <= z0_hi &&
                       n_post_check <= 0.10 &&
+                      (rectangular || r_post_check <= r_hi) &&
                       !q_spike_final
 
     # Additional fallback: when σ_obs was increased via retry AND the optimizer
@@ -648,30 +684,28 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     # Extract physical parameters
     Q_post  = exp.(θ_map[1:nt])
     n_post  = exp(θ_map[nt + 1])
-    r_post  = exp(θ_map[nt + 2])
-    z0_post = θ_map[nt + 3]
+    if rectangular
+        r_post  = NaN  # no r parameter
+        z0_post = θ_map[nt + 2]
+    else
+        r_post  = exp(θ_map[nt + 2])
+        z0_post = θ_map[nt + 3]
+    end
 
-    # --- Profile refit: fix n, r and re-estimate Q, z₀ only ---
-    # The joint MAP estimation can produce biased Q because the optimizer
-    # compensates between Q and n (the Q–n degeneracy). By fixing n and r
-    # at their MAP estimates and re-optimizing only Q and z₀, the WSE
-    # observations directly constrain Q magnitude without the degeneracy.
-    #
-    # This works because n and r are primarily determined by the WSE profile
-    # *shape* (curvature, backwater) rather than its absolute level. Once
-    # shape parameters are fixed, Q and z₀ are the only degrees of freedom
-    # affecting the WSE level, making Q identifiable from WSE alone.
+    # --- Profile refit: fix n (and r if Dingman) and re-estimate Q, z₀ only ---
     θ_profile = _profile_refit(θ_map, precomp, p; σ_obs=σ_use, ν=ν,
-                                λ_smooth=λ_use, use_width=use_width)
+                                λ_smooth=λ_use, use_width=use_width,
+                                rectangular=rectangular)
     if θ_profile !== nothing
         Q_post  = exp.(θ_profile[1:nt])
         z0_post = θ_profile[nt + 1]  # z₀ may shift to accommodate new Q
-        # n and r remain at their MAP values
+        # n (and r in Dingman mode) remain at their MAP values
         println("  Profile refit: Q range=$(round(minimum(Q_post),digits=1))..$(round(maximum(Q_post),digits=1)), z0=$(round(z0_post,digits=2))")
     end
 
     # Laplace uncertainty (use the final objective with the correct σ_obs)
-    final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
+    final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use,
+                                 use_width=use_width, rectangular=rectangular)
     Σ = laplace_uncertainty(final_obj, θ_map)
     # Q_std via delta method: σ_Q ≈ Q · σ_{logQ}
     Q_std = Q_post .* sqrt.(diag(Σ)[1:nt])
@@ -709,18 +743,23 @@ The parameter vector for the profile refit is:
 Optimized parameter vector of length nt+1, or `nothing` if the refit fails.
 """
 function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
-                        σ_obs, ν, λ_smooth, use_width)
+                        σ_obs, ν, λ_smooth, use_width, rectangular=false)
     nt = precomp.nt
 
-    # Fix n and r at their MAP values
+    # Fix n (and r in Dingman mode) at their MAP values
     n_fixed = exp(θ_map[nt + 1])
-    r_fixed = exp(θ_map[nt + 2])
+    if !rectangular
+        r_fixed = exp(θ_map[nt + 2])
+    end
 
-    # Yb depends on z₀, so we need to recompute it in the objective
     # Initialize from MAP: logQ from joint, z₀ from joint
-    θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 3])  # logQ_1..logQ_nt, z₀
+    if rectangular
+        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 2])  # logQ_1..logQ_nt, z₀
+    else
+        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 3])  # logQ_1..logQ_nt, z₀
+    end
 
-    # Profile objective: fix n and r, optimize only logQ and z₀
+    # Profile objective: fix n (and r if Dingman), optimize only logQ and z₀
     function profile_obj(θ_p)
         logQ_p = view(θ_p, 1:nt)
         z0_p   = θ_p[nt + 1]
@@ -742,9 +781,15 @@ function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
         # --- 1. WSE likelihood (same as neg_log_joint but with n, r fixed) ---
         for k in 1:length(precomp.valid_ts)
             Q_t = exp(logQ_p[precomp.valid_ts[k]])
-            WSE_pred = manning_wse_backwater(
-                Q_t, n_fixed, r_fixed, z0_p, precomp.S0, precomp.H_bc[k],
-                precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+            if rectangular
+                WSE_pred = manning_wse_backwater_rect(
+                    Q_t, n_fixed, z0_p, precomp.S0, precomp.H_bc[k],
+                    precomp.x_nodes, precomp.Wb_nodes, precomp.z_ref_nodes)
+            else
+                WSE_pred = manning_wse_backwater(
+                    Q_t, n_fixed, r_fixed, z0_p, precomp.S0, precomp.H_bc[k],
+                    precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+            end
 
             js   = precomp.upstream_j[k]
             Hobs = precomp.upstream_H[k]
@@ -760,12 +805,19 @@ function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
                 end
             end
                 if use_width && !isnan(Wobs[idx])
-                    y_at_node = max((WSE_pred[js[idx]] - z0_p - precomp.z_ref_nodes[js[idx]]) * r_fixed / (r_fixed + 1), 0.01)
-                    Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0_p, 0.01)
-                    W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r_fixed)
-                    σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
-                    residual_W = Wobs[idx] - W_pred
-                    nll += 0.5 * (residual_W / σ_W)^2
+                    if rectangular
+                        W_pred = precomp.Wb_nodes[js[idx]]
+                        σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
+                        residual_W = Wobs[idx] - W_pred
+                        nll += 0.5 * (residual_W / σ_W)^2
+                    else
+                        y_at_node = max((WSE_pred[js[idx]] - z0_p - precomp.z_ref_nodes[js[idx]]) * r_fixed / (r_fixed + 1), 0.01)
+                        Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0_p, 0.01)
+                        W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r_fixed)
+                        σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
+                        residual_W = Wobs[idx] - W_pred
+                        nll += 0.5 * (residual_W / σ_W)^2
+                    end
                 end
             end
         end
@@ -959,17 +1011,16 @@ The `months` vector (length nt) maps each timestep to its calendar month,
 allowing correct seasonal initialization even for unobserved timesteps.
 """
 function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp,
-                           months::Vector{Int} = fill(1, precomp.nt))
+                           months::Vector{Int} = fill(1, precomp.nt);
+                           rectangular::Bool = false)
     nt = precomp.nt
 
     # Static parameters from prior medians
     n_init = quantile(p.np, 0.5)
-    r_init = quantile(p.rp, 0.5)
     z0_init = quantile(p.zp, 0.5)
 
     # Initialize Q from monthly prior medians using the correct calendar month
-    # for each timestep. Previously, unobserved timesteps fell back to month 1,
-    # which flattened the seasonal cycle for data-sparse reaches.
+    # for each timestep.
     logQ_init = fill(0.0, nt)
     for t in 1:nt
         mo = months[t]
@@ -978,7 +1029,12 @@ function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp,
         logQ_init[t] = log(max(q_median, 0.01))
     end
 
-    return vcat(logQ_init, log(n_init), log(r_init), z0_init)
+    if rectangular
+        return vcat(logQ_init, log(n_init), z0_init)  # no r parameter
+    else
+        r_init = quantile(p.rp, 0.5)
+        return vcat(logQ_init, log(n_init), log(r_init), z0_init)
+    end
 end
 
 """
