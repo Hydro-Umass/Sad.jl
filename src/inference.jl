@@ -651,6 +651,25 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     r_post  = exp(θ_map[nt + 2])
     z0_post = θ_map[nt + 3]
 
+    # --- Profile refit: fix n, r and re-estimate Q, z₀ only ---
+    # The joint MAP estimation can produce biased Q because the optimizer
+    # compensates between Q and n (the Q–n degeneracy). By fixing n and r
+    # at their MAP estimates and re-optimizing only Q and z₀, the WSE
+    # observations directly constrain Q magnitude without the degeneracy.
+    #
+    # This works because n and r are primarily determined by the WSE profile
+    # *shape* (curvature, backwater) rather than its absolute level. Once
+    # shape parameters are fixed, Q and z₀ are the only degrees of freedom
+    # affecting the WSE level, making Q identifiable from WSE alone.
+    θ_profile = _profile_refit(θ_map, precomp, p; σ_obs=σ_use, ν=ν,
+                                λ_smooth=λ_use, use_width=use_width)
+    if θ_profile !== nothing
+        Q_post  = exp.(θ_profile[1:nt])
+        z0_post = θ_profile[nt + 1]  # z₀ may shift to accommodate new Q
+        # n and r remain at their MAP values
+        println("  Profile refit: Q range=$(round(minimum(Q_post),digits=1))..$(round(maximum(Q_post),digits=1)), z0=$(round(z0_post,digits=2))")
+    end
+
     # Laplace uncertainty (use the final objective with the correct σ_obs)
     final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width)
     Σ = laplace_uncertainty(final_obj, θ_map)
@@ -668,6 +687,130 @@ function infer(p::SWOTPriors, reach::SWOTReach;
             valid_ts = precomp.valid_ts,
             precomp  = precomp,
             fallback = false)
+end
+
+"""
+    _profile_refit(θ_map, precomp, priors; kwargs...) -> Vector or nothing
+
+Profile refit: fix n and r at their MAP estimates and re-optimize Q and z₀ only.
+
+After the joint MAP estimation (which estimates Q, n, r, z₀ simultaneously),
+the n–Q degeneracy can cause Q to be biased toward the prior. By fixing
+n and r (which are primarily determined by the WSE profile shape) and
+re-optimizing only Q_{1:T} and z₀ (which determine the WSE level),
+the WSE observations directly constrain Q magnitude.
+
+The parameter vector for the profile refit is:
+- θ[1:nt]      = log(Q_t)   — discharge at each timestep
+- θ[nt + 1]  = z₀          — downstream bed elevation
+- n and r are fixed at their MAP values from the joint estimation
+
+# Returns
+Optimized parameter vector of length nt+1, or `nothing` if the refit fails.
+"""
+function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
+                        σ_obs, ν, λ_smooth, use_width)
+    nt = precomp.nt
+
+    # Fix n and r at their MAP values
+    n_fixed = exp(θ_map[nt + 1])
+    r_fixed = exp(θ_map[nt + 2])
+
+    # Yb depends on z₀, so we need to recompute it in the objective
+    # Initialize from MAP: logQ from joint, z₀ from joint
+    θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 3])  # logQ_1..logQ_nt, z₀
+
+    # Profile objective: fix n and r, optimize only logQ and z₀
+    function profile_obj(θ_p)
+        logQ_p = view(θ_p, 1:nt)
+        z0_p   = θ_p[nt + 1]
+
+        # Yb depends on z₀ — must recompute for each evaluation
+        Yb_nodes = max.(precomp.hbf_z_nodes .- z0_p, 0.01)
+
+        nll = zero(z0_p)  # correct Dual type
+
+        # Pre-compute month index
+        month_map = zeros(Int, nt)
+        for (ki, t) in enumerate(precomp.valid_ts)
+            month_map[t] = precomp.months_v[ki]
+        end
+        for t in 1:nt
+            month_map[t] = month_map[t] == 0 ? 1 : month_map[t]
+        end
+
+        # --- 1. WSE likelihood (same as neg_log_joint but with n, r fixed) ---
+        for k in 1:length(precomp.valid_ts)
+            Q_t = exp(logQ_p[precomp.valid_ts[k]])
+            WSE_pred = manning_wse_backwater(
+                Q_t, n_fixed, r_fixed, z0_p, precomp.S0, precomp.H_bc[k],
+                precomp.x_nodes, precomp.Wb_nodes, Yb_nodes, precomp.z_ref_nodes)
+
+            js   = precomp.upstream_j[k]
+            Hobs = precomp.upstream_H[k]
+            Wobs = precomp.upstream_W[k]
+            σ = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
+            for idx in 1:length(js)
+                if !isnan(Hobs[idx])
+                    residual_H = Hobs[idx] - WSE_pred[js[idx]]
+                    if isinf(ν)
+                        nll += 0.5 * (residual_H / σ)^2
+                    else
+                        nll += ((ν + 1) / 2) * log(1 + (residual_H / σ)^2 / ν)
+                end
+            end
+                if use_width && !isnan(Wobs[idx])
+                    y_at_node = max((WSE_pred[js[idx]] - z0_p - precomp.z_ref_nodes[js[idx]]) * r_fixed / (r_fixed + 1), 0.01)
+                    Yb_at_node = max(precomp.hbf_z_nodes[js[idx]] - z0_p, 0.01)
+                    W_pred = precomp.Wb_nodes[js[idx]] * (y_at_node / Yb_at_node)^(1/r_fixed)
+                    σ_W = max(precomp.σ_W_est * precomp.Wb_nodes[js[idx]], 0.15 * precomp.Wb_nodes[js[idx]])
+                    residual_W = Wobs[idx] - W_pred
+                    nll += 0.5 * (residual_W / σ_W)^2
+                end
+            end
+        end
+
+        # --- 2. Q priors (log-space, same as joint) ---
+        for t in 1:nt
+            q_prior = monthly_q_prior(priors, month_map[t])
+            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+            if d isa LogNormal
+                nll -= logpdf(Normal(d.μ, d.σ), logQ_p[t])
+            else
+                nll -= safe_logpdf(q_prior, exp(logQ_p[t])) + logQ_p[t]
+            end
+        end
+
+        # --- 3. z₀ prior ---
+        nll -= safe_logpdf(priors.zp, z0_p)
+
+        # --- 4. Temporal smoothness (same as joint) ---
+        for t in 2:nt
+            nll += λ_smooth * (logQ_p[t] - logQ_p[t - 1])^2
+        end
+
+        return nll
+    end
+
+    # Gradient via ForwardDiff
+    function profile_g!(G, θ_p)
+        G .= ForwardDiff.gradient(profile_obj, θ_p)
+    end
+
+    # L-BFGS optimization
+    try
+        result_p = optimize(profile_obj, profile_g!, θ0_profile, LBFGS(),
+                           Optim.Options(iterations=500, g_tol=1e-6,
+                                         allow_f_increases=true))
+        if Optim.converged(result_p) || result_p.iterations > 10
+            return Optim.minimizer(result_p)
+        else
+            return nothing
+        end
+    catch e
+        @warn "_profile_refit: optimization failed" exception=(e, catch_backtrace())
+        return nothing
+    end
 end
 
 """
