@@ -173,7 +173,8 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
               iterations::Int    = 500,
               g_tol::Float64     = 1e-6,
               use_width::Bool    = false,
-              rectangular::Bool  = false)
+              rectangular::Bool  = false,
+              outlier_thresh::Float64 = 1.0)
 
     nids, x = river_info(reachid, swordfile)
     H, W, S, dA, Hr, Wr, Sr, time_str = read_swot_obs(swotfile, nids)
@@ -184,7 +185,7 @@ function main(reachid, swordfile, sosfile, swotfile, outdir;
         return
     end
 
-    reach = Sad.preprocess(x, H, W, S)
+    reach = Sad.preprocess(x, H, W, S; outlier_thresh=outlier_thresh)
 
     p = Sad.priors(sosfile, reach.hmin, reachid; S0=mean(reach.S0.(reach.x)))
     if ismissing(p)

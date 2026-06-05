@@ -96,7 +96,8 @@ smooths WSE profiles with penalized B-splines.
 function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Matrix{FloatM},
                     Sobs :: Union{Nothing, Matrix{FloatM}} = nothing;
                     dx :: Float64 = 200.0, min_slope :: Float64 = 1e-5,
-                    nknots :: Int = 15, lambda :: Union{Nothing, Float64} = nothing)
+                    nknots :: Int = 15, lambda :: Union{Nothing, Float64} = nothing,
+                    outlier_thresh :: Float64 = 1.0)
     # If Sobs is not provided, create a dummy one for drop_unobserved
     if isnothing(Sobs)
         nobs_orig = size(Hobs, 1)
@@ -141,7 +142,13 @@ function preprocess(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: Mat
     hbf_itp = PCHIPInterpolation(hbf, x; extrapolation=ExtrapolationType.Linear)
 
     # WSE and width at computational nodes per timestep
-    # TODO: add B-spline per-timestep WSE smoothing as an option via nknots/lambda
+    # Outlier rejection: fit monotonic B-spline to WSE profile each timestep,
+    # flag observations > outlier_thresh from the spline.
+    if outlier_thresh > 0.0
+        Hobs, Wobs = reject_wse_outliers(xobs, Hobs, Wobs, outlier_thresh;
+                                         nknots=nknots, lambda=lambda,
+                                         min_slope=min_slope)
+    end
     H_f, W_f, valid = obs_chainage(xobs, Hobs, Wobs, min_slope)
     W = zeros(nx, nt)
     H = zeros(nx, nt)
@@ -222,6 +229,93 @@ function obs_chainage(xobs :: Vector{Float64}, Hobs :: Matrix{FloatM}, Wobs :: M
         valid[t] = true
     end
     return Hout, Wout, valid
+end
+
+"""
+    reject_wse_outliers(xobs, Hobs, Wobs, threshold; kwargs...) -> (Hobs, Wobs)
+
+Reject WSE (and corresponding width) observations that deviate more than
+`threshold` meters from a monotonic smoothing B-spline fitted to the WSE
+profile at each timestep.
+
+For each timestep with valid WSE observations:
+1. Fit a monotonic penalized B-spline to the WSE profile
+2. Flag nodes where |WSE_obs - WSE_spline| > threshold
+3. Set flagged WSE (and corresponding width) to `missing`
+
+Thres prevents individual outlier nodes (vegetation, islands, instrument
+errors) from biasing the Manning inference. The spline is only used for
+outlier detection — spline values never enter inference.
+
+# Arguments
+- `xobs`: observation node locations [m]
+- `Hobs`: WSE observations (nobs x nt) — modified in-place copy
+- `Wobs`: width observations (nobs x nt) — modified in-place copy
+- `threshold`: outlier threshold [m]; 0.0 disables rejection
+- `nknots`: B-spline knots (default: max(8, nobs÷4))
+- `lambda`: smoothing parameter; `nothing` = GCV (default)
+- `min_slope`: minimum WSE slope for monotonicity enforcement
+
+# Returns
+(Hobs_clean, Wobs_clean) — copies with outliers set to `missing`
+"""
+function reject_wse_outliers(xobs::Vector{Float64},
+                             Hobs::Matrix{FloatM},
+                             Wobs::Matrix{FloatM},
+                             threshold::Float64;
+                             nknots::Int = max(8, length(xobs) ÷ 4),
+                             lambda::Union{Nothing, Float64} = nothing,
+                             min_slope::Float64 = 1e-5)
+    nn, nt = size(Hobs)
+    Hout = copy(Hobs)
+    Wout = copy(Wobs)
+    n_rejected = 0
+    n_timesteps = 0
+
+    for t in 1:nt
+        # Get valid WSE obs at this timestep
+        valid_h = findall(.!ismissing.(Hobs[:, t]))
+        length(valid_h) < 5 && continue  # need enough nodes to fit a spline
+
+        wse_vals = Float64.(Hobs[valid_h, t])
+        x_vals = xobs[valid_h]
+
+        # Fit monotonic smoothing spline
+        # WSE must increase upstream (xobs sorted downstream→upstream)
+        # In SAD convention: xobs[1] = downstream (lowest WSE), xobs[end] = upstream
+        # So WSE should be monotonically increasing with xobs
+        try
+            spl = smooth_profile_bspline(x_vals, wse_vals;
+                                         nknots=min(nknots, length(valid_h) ÷ 2),
+                                         lambda=lambda,
+                                         monotone_slope=min_slope)
+
+            # Evaluate spline at observation nodes
+            wse_spline = spl.(x_vals)
+
+            # Flag outliers
+            for (idx, node_idx) in enumerate(valid_h)
+                deviation = abs(wse_vals[idx] - wse_spline[idx])
+                if deviation > threshold
+                    Hout[node_idx, t] = missing
+                    Wout[node_idx, t] = missing
+                    n_rejected += 1
+                end
+            end
+            n_timesteps += 1
+        catch
+            # Spline fitting can fail for very sparse or noisy data
+            # Just keep all observations in this case
+            continue
+        end
+    end
+
+    if n_rejected > 0
+        total_obs = count(.!ismissing.(Hobs))
+        @info "reject_wse_outliers: removed $n_rejected observations ($(round(n_rejected/total_obs*100, digits=1))%) across $n_timesteps timesteps (threshold=$(threshold)m)"
+    end
+
+    return Hout, Wout
 end
 
 """

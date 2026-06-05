@@ -15,7 +15,7 @@
 # All kwargs from main() are supported via flags:
 #   --λ-smooth 0.1   --ν 5.0   --σ-obs NaN   --iterations 500   --g-tol 1e-6
 #   --sword-dir DIR  --sos-dir DIR  --sword-version v17  --sos-version v17
-#   --dry-run   --no-width   --dingman   (use --dingman to disable rectangular default)
+#   --dry-run   --no-width   --dingman   --outlier-thresh 1.0
 #
 
 using Distributed
@@ -38,6 +38,7 @@ struct Config
     dry_run::Bool
     use_width::Bool
     rectangular::Bool
+    outlier_thresh::Float64
 end
 
 function parse_args(args)
@@ -55,7 +56,8 @@ function parse_args(args)
         1e-6,                    # g_tol
         false,                   # dry_run
         false,                   # use_width
-        true                     # rectangular (default: rectangular channel)
+        true,                    # rectangular (default: rectangular channel)
+        1.0                      # outlier_thresh [m]
     )
 
     positional = String[]
@@ -107,7 +109,8 @@ function parse_args(args)
         parse(Float64, get(kw, "g-tol", string(defaults.g_tol))),
         dry_run,
         use_width,
-        rectangular
+        rectangular,
+        parse(Float64, get(kw, "outlier-thresh", string(defaults.outlier_thresh)))
     )
 end
 
@@ -162,12 +165,13 @@ end
 
 @everywhere function _run_sad_reach(reachid, swordfile, sosfile, swotfile, outdir;
                                     σ_obs, ν, λ_smooth, iterations, g_tol, use_width,
-                                    rectangular)
+                                    rectangular, outlier_thresh)
     try
         main(reachid, swordfile, sosfile, swotfile, outdir;
              σ_obs=σ_obs, ν=ν, λ_smooth=λ_smooth,
              iterations=iterations, g_tol=g_tol,
-             use_width=use_width, rectangular=rectangular)
+             use_width=use_width, rectangular=rectangular,
+             outlier_thresh=outlier_thresh)
         return (reachid=reachid, status=:ok)
     catch e
         @warn "$(reachid): unhandled error" exception=(e, catch_backtrace())
@@ -190,7 +194,8 @@ function main_entry()
     println("Workers available:  $(nworkers())")
     println("Parameters: λ_smooth=$(cfg.λ_smooth), ν=$(cfg.ν), " *
             "σ_obs=$(cfg.σ_obs), iterations=$(cfg.iterations), g_tol=$(cfg.g_tol), " *
-            "use_width=$(cfg.use_width), rectangular=$(cfg.rectangular)")
+            "use_width=$(cfg.use_width), rectangular=$(cfg.rectangular), " *
+            "outlier_thresh=$(cfg.outlier_thresh)m")
 
     if cfg.dry_run        println("\nDry run — would process:")
         for t in tasks
@@ -216,6 +221,7 @@ function main_entry()
     kw_g_tol    = cfg.g_tol
     kw_use_width = cfg.use_width
     kw_rectangular = cfg.rectangular
+    kw_outlier_thresh = cfg.outlier_thresh
 
     println("\nProcessing $(length(tasks)) reaches on $(nworkers()) workers...")
     t_start = now()
@@ -226,7 +232,8 @@ function main_entry()
                        task.swotfile, out_dir;
                        σ_obs=kw_σ_obs, ν=kw_ν, λ_smooth=kw_λ_smooth,
                        iterations=kw_iters, g_tol=kw_g_tol,
-                       use_width=kw_use_width, rectangular=kw_rectangular)
+                       use_width=kw_use_width, rectangular=kw_rectangular,
+                       outlier_thresh=kw_outlier_thresh)
     end
 
     elapsed = canonicalize(now() - t_start)
