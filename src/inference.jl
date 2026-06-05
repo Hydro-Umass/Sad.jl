@@ -813,6 +813,18 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                 println("  WSE-Width correction: z0 $(round(old_z0,digits=2))→$(round(z0_post,digits=2)), Q mean $(round(old_Qmean,digits=1))→$(round(mean(Q_post),digits=1))")
             end
         end
+
+        # --- Shallow-depth fallback (rectangular mode) ---
+        # In rectangular mode, z₀ and depth are degenerate: WSE = z₀ + y.
+        # The optimizer can push z₀ toward hmin, resulting in very shallow
+        # depth (y_min < threshold) and systematically underestimated Q.
+        # For these reaches, the prior+WSE anomaly fallback produces more
+        # reliable Q estimates because it avoids the Q-z₀ degeneracy.
+        if rectangular && reach.hmin - z0_post < 0.5
+            @info "shallow_depth_fallback" z0=z0_post hmin=reach.hmin depth_min=reach.hmin-z0_post
+            println("  Shallow-depth fallback: z₀=$(round(z0_post,digits=2)) is within 0.5m of hmin=$(round(reach.hmin,digits=2)). Using prior + WSE anomaly.")
+            return _prior_anomaly_fallback(p, precomp, reach)
+        end
     end
 
     # Laplace uncertainty (use the final objective with the correct σ_obs)
