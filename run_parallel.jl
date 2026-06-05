@@ -39,6 +39,8 @@ struct Config
     use_width::Bool
     rectangular::Bool
     outlier_thresh::Float64
+    departure::Bool
+    σ_α::Float64
 end
 
 function parse_args(args)
@@ -57,7 +59,9 @@ function parse_args(args)
         false,                   # dry_run
         false,                   # use_width
         true,                    # rectangular (default: rectangular channel)
-        1.0                      # outlier_thresh [m]
+        1.0,                     # outlier_thresh [m]
+        true,                    # departure (default: infer Q/Q_prior, not Q directly)
+        2.0                      # σ_α (departure prior width, log-space)
     )
 
     positional = String[]
@@ -94,6 +98,7 @@ function parse_args(args)
 
     use_width = no_width ? false : parse(Bool, get(kw, "use-width", string(defaults.use_width)))
     rectangular = no_rect ? false : parse(Bool, get(kw, "rectangular", string(defaults.rectangular)))
+    departure = parse(Bool, get(kw, "departure", string(defaults.departure)))
 
     Config(
         swot_dir,
@@ -110,7 +115,9 @@ function parse_args(args)
         dry_run,
         use_width,
         rectangular,
-        parse(Float64, get(kw, "outlier-thresh", string(defaults.outlier_thresh)))
+        parse(Float64, get(kw, "outlier-thresh", string(defaults.outlier_thresh))),
+        departure,
+        parse(Float64, get(kw, "σ-α", string(defaults.σ_α)))
     )
 end
 
@@ -165,13 +172,14 @@ end
 
 @everywhere function _run_sad_reach(reachid, swordfile, sosfile, swotfile, outdir;
                                     σ_obs, ν, λ_smooth, iterations, g_tol, use_width,
-                                    rectangular, outlier_thresh)
+                                    rectangular, outlier_thresh, departure, σ_α)
     try
         main(reachid, swordfile, sosfile, swotfile, outdir;
              σ_obs=σ_obs, ν=ν, λ_smooth=λ_smooth,
              iterations=iterations, g_tol=g_tol,
              use_width=use_width, rectangular=rectangular,
-             outlier_thresh=outlier_thresh)
+             outlier_thresh=outlier_thresh,
+             departure=departure, σ_α=σ_α)
         return (reachid=reachid, status=:ok)
     catch e
         @warn "$(reachid): unhandled error" exception=(e, catch_backtrace())
@@ -195,7 +203,7 @@ function main_entry()
     println("Parameters: λ_smooth=$(cfg.λ_smooth), ν=$(cfg.ν), " *
             "σ_obs=$(cfg.σ_obs), iterations=$(cfg.iterations), g_tol=$(cfg.g_tol), " *
             "use_width=$(cfg.use_width), rectangular=$(cfg.rectangular), " *
-            "outlier_thresh=$(cfg.outlier_thresh)m")
+            "outlier_thresh=$(cfg.outlier_thresh)m, departure=$(cfg.departure), σ_α=$(cfg.σ_α)")
 
     if cfg.dry_run        println("\nDry run — would process:")
         for t in tasks
@@ -222,6 +230,8 @@ function main_entry()
     kw_use_width = cfg.use_width
     kw_rectangular = cfg.rectangular
     kw_outlier_thresh = cfg.outlier_thresh
+    kw_departure = cfg.departure
+    kw_σ_α = cfg.σ_α
 
     println("\nProcessing $(length(tasks)) reaches on $(nworkers()) workers...")
     t_start = now()
@@ -233,7 +243,8 @@ function main_entry()
                        σ_obs=kw_σ_obs, ν=kw_ν, λ_smooth=kw_λ_smooth,
                        iterations=kw_iters, g_tol=kw_g_tol,
                        use_width=kw_use_width, rectangular=kw_rectangular,
-                       outlier_thresh=kw_outlier_thresh)
+                       outlier_thresh=kw_outlier_thresh,
+                       departure=kw_departure, σ_α=kw_σ_α)
     end
 
     elapsed = canonicalize(now() - t_start)

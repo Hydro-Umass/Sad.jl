@@ -309,11 +309,37 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
                        ν::Float64    = 5.0,
                        λ_smooth::Float64 = 0.0,
                        use_width::Bool = false,
-                       rectangular::Bool = false)
+                       rectangular::Bool = false,
+                       departure::Bool = false,
+                       σ_α::Float64 = NaN)
     # Auto-select σ_obs from estimated noise if not provided
     σ = isnan(σ_obs) ? precomp.σ_obs_est : σ_obs
     nt = precomp.nt
-    logQ = view(θ, 1:nt)
+
+    # Extract parameters
+    if departure
+        # Departure parameterization: θ[1:nt] = log(α_t) where Q_t = α_t × Q_prior(t)
+        logα = view(θ, 1:nt)
+        # Compute logQ from departure and monthly prior
+        logQ_vec = similar(logα)
+        for t in 1:nt
+            ki = findfirst(==(t), precomp.valid_ts)
+            mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+            q_prior = monthly_q_prior(priors, mo)
+            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+            if d isa LogNormal
+                logQ_vec[t] = logα[t] + d.μ  # logQ = logα + log(Q_prior_median)
+            else
+                q_med = quantile(q_prior, 0.5)
+                logQ_vec[t] = logα[t] + log(max(q_med, 0.01))
+            end
+        end
+        logQ = logQ_vec  # now logQ is computed, not a direct parameter
+    else
+        # Direct parameterization: θ[1:nt] = log(Q_t)
+        logQ = view(θ, 1:nt)
+    end
+
     logn = θ[nt + 1]
     n = exp(logn)
 
@@ -335,7 +361,6 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     for (ki, t) in enumerate(precomp.valid_ts)
         month_map[t] = precomp.months_v[ki]
     end
-    # Invalid timesteps default to month 1
     for t in 1:nt
         if month_map[t] == 0
             month_map[t] = 1
@@ -389,16 +414,27 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
         end
     end
 
-    # --- 2. Q priors (in log-Q space) ---
-    for t in 1:nt
-        q_prior = monthly_q_prior(priors, month_map[t])
-        d = q_prior isa Truncated ? q_prior.untruncated : q_prior
-        if d isa LogNormal
-            # logQ ~ Normal(d.μ, d.σ) in log-space — exact, always finite
-            nll -= logpdf(Normal(d.μ, d.σ), logQ[t])
-        else
-            # Fallback: use safe_logpdf with Jacobian correction
-            nll -= safe_logpdf(q_prior, exp(logQ[t])) + logQ[t]
+    # --- 2. Q priors ---
+    if departure
+        # Departure parameterization: logα ~ N(0, σ_α)
+        # This is equivalent to logQ ~ N(log(Q_prior_median), σ_α)
+        # but centered on 0 for better optimization conditioning.
+        # σ_α controls how far Q can deviate from the prior.
+        # If σ_α is not specified, use a wide default of 2.0.
+        σ_α_use = isnan(σ_α) ? 2.0 : σ_α
+        for t in 1:nt
+            nll += 0.5 * (logα[t] / σ_α_use)^2
+        end
+    else
+        # Direct parameterization: logQ priors from SoS monthly distributions
+        for t in 1:nt
+            q_prior = monthly_q_prior(priors, month_map[t])
+            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+            if d isa LogNormal
+                nll -= logpdf(Normal(d.μ, d.σ), logQ[t])
+            else
+                nll -= safe_logpdf(q_prior, exp(logQ[t])) + logQ[t]
+            end
         end
     end
 
@@ -414,9 +450,21 @@ function neg_log_joint(θ::AbstractVector, precomp::ManningPrecomp,
     # z₀ prior (natural space, no Jacobian)
     nll -= safe_logpdf(priors.zp, z0)
 
-    # --- 4. Temporal smoothness on log-Q ---
-    for t in 2:nt
-        nll += λ_smooth * (logQ[t] - logQ[t - 1])^2
+    # --- 4. Temporal smoothness ---
+    if departure
+        # Smoothness on log-DEPARTURE: penalizes changes in α,
+        # preserving the prior's seasonal cycle.
+        # This allows Q to follow the prior's seasonality while
+        # penalizing rapid fluctuations in the departure α.
+        for t in 2:nt
+            nll += λ_smooth * (logα[t] - logα[t - 1])^2
+        end
+    else
+        # Smoothness on log-Q: penalizes all changes in Q,
+        # including the seasonal cycle that the prior predicts.
+        for t in 2:nt
+            nll += λ_smooth * (logQ[t] - logQ[t - 1])^2
+        end
     end
 
     return nll
@@ -474,7 +522,9 @@ function infer(p::SWOTPriors, reach::SWOTReach;
                g_tol::Float64   = 1e-6,
                S0::Union{Nothing, Float64} = nothing,
                use_width::Bool  = false,
-               rectangular::Bool = false)
+               rectangular::Bool = false,
+               departure::Bool   = false,
+               σ_α::Float64     = NaN)
     # Extract months
     months = if !isempty(time_str) && p.Qp isa Vector
         map(time_str) do s
@@ -541,10 +591,10 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     println("  σ_obs = $(round(σ_use, digits=3)) m, λ_smooth = $(round(λ_use, digits=4)) (data_fraction=$(round(data_fraction, digits=3)))")
 
     # Initialize from prior medians
-    θ0 = initialize_theta(p, precomp, months; rectangular=rectangular)
+    θ0 = initialize_theta(p, precomp, months; rectangular=rectangular, departure=departure)
 
     # Objective closure
-    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular)
+    obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular, departure=departure, σ_α=σ_α)
 
     # In-place gradient via ForwardDiff
     function g!(G, θ)
@@ -616,7 +666,7 @@ function infer(p::SWOTPriors, reach::SWOTReach;
         max_σ = 10.0 * σ_use
         while σ_use < max_σ
             σ_use *= 2.0
-            obj_retry(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular)
+            obj_retry(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use, use_width=use_width, rectangular=rectangular, departure=departure, σ_α=σ_α)
             function g_retry!(G, θ)
                 G .= ForwardDiff.gradient(obj_retry, θ)
             end
@@ -652,7 +702,25 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     end
 
     # Final check: are the parameters still unphysical or producing spikes after retries?
-    Q_final = exp.(Optim.minimizer(result)[1:nt])
+    if departure
+        # In departure mode, compute Q from α and prior for spike check
+        logα_final = Optim.minimizer(result)[1:nt]
+        Q_final = similar(logα_final)
+        for t in 1:nt
+            ki = findfirst(==(t), precomp.valid_ts)
+            mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+            q_prior = monthly_q_prior(p, mo)
+            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+            if d isa LogNormal
+                Q_final[t] = exp(logα_final[t] + d.μ)
+            else
+                q_med = quantile(q_prior, 0.5)
+                Q_final[t] = exp(logα_final[t]) * max(q_med, 0.01)
+            end
+        end
+    else
+        Q_final = exp.(Optim.minimizer(result)[1:nt])
+    end
     q_spike_final = any(Q_final .> 10.0 .* q_prior_medians)
     final_physical = n_lo <= n_post_check <= n_hi &&
                       z0_lo <= z0_post_check <= z0_hi &&
@@ -682,7 +750,26 @@ function infer(p::SWOTPriors, reach::SWOTReach;
     θ_map = Optim.minimizer(result)
 
     # Extract physical parameters
-    Q_post  = exp.(θ_map[1:nt])
+    if departure
+        # Convert departure to Q: Q_t = α_t × Q_prior(t)
+        logα_map = θ_map[1:nt]
+        logQ_map = similar(logα_map)
+        for t in 1:nt
+            ki = findfirst(==(t), precomp.valid_ts)
+            mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+            q_prior = monthly_q_prior(p, mo)
+            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+            if d isa LogNormal
+                logQ_map[t] = logα_map[t] + d.μ
+            else
+                q_med = quantile(q_prior, 0.5)
+                logQ_map[t] = logα_map[t] + log(max(q_med, 0.01))
+            end
+        end
+        Q_post = exp.(logQ_map)
+    else
+        Q_post = exp.(θ_map[1:nt])
+    end
     n_post  = exp(θ_map[nt + 1])
     if rectangular
         r_post  = NaN  # no r parameter
@@ -705,7 +792,8 @@ function infer(p::SWOTPriors, reach::SWOTReach;
 
     # Laplace uncertainty (use the final objective with the correct σ_obs)
     final_obj(θ) = neg_log_joint(θ, precomp, p; σ_obs=σ_use, ν=ν, λ_smooth=λ_use,
-                                 use_width=use_width, rectangular=rectangular)
+                                 use_width=use_width, rectangular=rectangular,
+                                 departure=departure, σ_α=σ_α)
     Σ = laplace_uncertainty(final_obj, θ_map)
     # Q_std via delta method: σ_Q ≈ Q · σ_{logQ}
     Q_std = Q_post .* sqrt.(diag(Σ)[1:nt])
@@ -743,7 +831,8 @@ The parameter vector for the profile refit is:
 Optimized parameter vector of length nt+1, or `nothing` if the refit fails.
 """
 function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
-                        σ_obs, ν, λ_smooth, use_width, rectangular=false)
+                        σ_obs, ν, λ_smooth, use_width, rectangular=false,
+                        departure=false, σ_α=NaN)
     nt = precomp.nt
 
     # Fix n (and r in Dingman mode) at their MAP values
@@ -752,16 +841,34 @@ function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
         r_fixed = exp(θ_map[nt + 2])
     end
 
-    # Initialize from MAP: logQ from joint, z₀ from joint
+    # Initialize from MAP: logQ or logα from joint, z₀ from joint
     if rectangular
-        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 2])  # logQ_1..logQ_nt, z₀
+        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 2])  # [logQ or logα]_1..[logQ or logα]_nt, z₀
     else
-        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 3])  # logQ_1..logQ_nt, z₀
+        θ0_profile = vcat(θ_map[1:nt], θ_map[nt + 3])  # [logQ or logα]_1..[logQ or logα]_nt, z₀
     end
 
-    # Profile objective: fix n (and r if Dingman), optimize only logQ and z₀
+    # Profile objective: fix n (and r if Dingman), optimize only logQ/logα and z₀
     function profile_obj(θ_p)
-        logQ_p = view(θ_p, 1:nt)
+        if departure
+            logα_p = view(θ_p, 1:nt)
+            # Compute logQ from departure
+            logQ_p = similar(logα_p)
+            for t in 1:nt
+                ki = findfirst(==(t), precomp.valid_ts)
+                mo = isnothing(ki) ? 1 : precomp.months_v[ki]
+                q_prior = monthly_q_prior(priors, mo)
+                d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+                if d isa LogNormal
+                    logQ_p[t] = logα_p[t] + d.μ
+                else
+                    q_med = quantile(q_prior, 0.5)
+                    logQ_p[t] = logα_p[t] + log(max(q_med, 0.01))
+                end
+            end
+        else
+            logQ_p = view(θ_p, 1:nt)
+        end
         z0_p   = θ_p[nt + 1]
 
         # Yb depends on z₀ — must recompute for each evaluation
@@ -822,23 +929,40 @@ function _profile_refit(θ_map, precomp::ManningPrecomp, priors::SWOTPriors;
             end
         end
 
-        # --- 2. Q priors (log-space, same as joint) ---
-        for t in 1:nt
-            q_prior = monthly_q_prior(priors, month_map[t])
-            d = q_prior isa Truncated ? q_prior.untruncated : q_prior
-            if d isa LogNormal
-                nll -= logpdf(Normal(d.μ, d.σ), logQ_p[t])
-            else
-                nll -= safe_logpdf(q_prior, exp(logQ_p[t])) + logQ_p[t]
+        # --- 2. Q priors ---
+        if departure
+            # Departure parameterization: logα ~ N(0, σ_α)
+            σ_α_use = isnan(σ_α) ? 2.0 : σ_α
+            for t in 1:nt
+                nll += 0.5 * (logα_p[t] / σ_α_use)^2
+            end
+        else
+            # Direct parameterization: logQ priors from SoS monthly distributions
+            for t in 1:nt
+                q_prior = monthly_q_prior(priors, month_map[t])
+                d = q_prior isa Truncated ? q_prior.untruncated : q_prior
+                if d isa LogNormal
+                    nll -= logpdf(Normal(d.μ, d.σ), logQ_p[t])
+                else
+                    nll -= safe_logpdf(q_prior, exp(logQ_p[t])) + logQ_p[t]
+                end
             end
         end
 
         # --- 3. z₀ prior ---
         nll -= safe_logpdf(priors.zp, z0_p)
 
-        # --- 4. Temporal smoothness (same as joint) ---
-        for t in 2:nt
-            nll += λ_smooth * (logQ_p[t] - logQ_p[t - 1])^2
+        # --- 4. Temporal smoothness ---
+        if departure
+            # Smoothness on log-departure
+            for t in 2:nt
+                nll += λ_smooth * (logα_p[t] - logα_p[t - 1])^2
+            end
+        else
+            # Smoothness on log-Q
+            for t in 2:nt
+                nll += λ_smooth * (logQ_p[t] - logQ_p[t - 1])^2
+            end
         end
 
         return nll
@@ -1012,22 +1136,30 @@ allowing correct seasonal initialization even for unobserved timesteps.
 """
 function initialize_theta(p::SWOTPriors, precomp::ManningPrecomp,
                            months::Vector{Int} = fill(1, precomp.nt);
-                           rectangular::Bool = false)
+                           rectangular::Bool = false,
+                           departure::Bool = false)
     nt = precomp.nt
 
     # Static parameters from prior medians
     n_init = quantile(p.np, 0.5)
     z0_init = quantile(p.zp, 0.5)
 
-    # Initialize Q from monthly prior medians using the correct calendar month
-    # for each timestep.
-    logQ_init = fill(0.0, nt)
-    for t in 1:nt
-        mo = months[t]
-        q_prior = monthly_q_prior(p, mo)
-        q_median = quantile(q_prior, 0.5)
-        logQ_init[t] = log(max(q_median, 0.01))
+    if departure
+        # Departure parameterization: θ[1:nt] = log(α_t) where Q_t = α_t × Q_prior(t)
+        # Initialize α = 1 (no departure from prior)
+        logα_init = fill(0.0, nt)  # log(1) = 0
+    else
+        # Direct parameterization: θ[1:nt] = log(Q_t)
+        # Initialize Q from monthly prior medians
+        logα_init = fill(0.0, nt)  # will be overwritten
+        for t in 1:nt
+            mo = months[t]
+            q_prior = monthly_q_prior(p, mo)
+            q_median = quantile(q_prior, 0.5)
+            logα_init[t] = log(max(q_median, 0.01))
+        end
     end
+    logQ_init = logα_init  # same variable, different semantics
 
     if rectangular
         return vcat(logQ_init, log(n_init), z0_init)  # no r parameter
